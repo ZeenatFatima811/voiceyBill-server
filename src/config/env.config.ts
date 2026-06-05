@@ -33,6 +33,11 @@ const envConfig = () => ({
   ),
 
   FRONTEND_ORIGIN: getEnv("FRONTEND_ORIGIN", "http://localhost:5173"),
+
+  // Google OAuth
+  GOOGLE_CLIENT_ID: getEnv("GOOGLE_CLIENT_ID"),
+  GOOGLE_ANDROID_CLIENT_ID: getEnv("GOOGLE_ANDROID_CLIENT_ID", ""),
+  GOOGLE_IOS_CLIENT_ID: getEnv("GOOGLE_IOS_CLIENT_ID", ""),
 });
 
 export const Env = envConfig();
