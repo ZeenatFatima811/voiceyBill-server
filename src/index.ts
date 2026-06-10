@@ -17,6 +17,7 @@ import { initializeCrons } from "./cron";
 import reportRoutes from "./routes/report.route";
 import analyticsRoutes from "./routes/analytics.route";
 import voiceRoutes from "./routes/voice.route";
+import categoryRoutes from "./routes/category.route";
 import budgetRoutes from "./routes/budget.route";
 import currencyRoutes from "./routes/currency.route";
 
@@ -139,6 +140,7 @@ app.use(`${BASE_PATH}/transaction`, ensureDatabaseConnection, passportAuthentica
 app.use(`${BASE_PATH}/report`, ensureDatabaseConnection, passportAuthenticateJwt, reportRoutes);
 app.use(`${BASE_PATH}/analytics`, ensureDatabaseConnection, passportAuthenticateJwt, analyticsRoutes);
 app.use(`${BASE_PATH}/voice`, ensureDatabaseConnection, passportAuthenticateJwt, voiceRoutes);
+app.use(`${BASE_PATH}/category`, ensureDatabaseConnection, passportAuthenticateJwt, categoryRoutes);
 app.use(`${BASE_PATH}/budget`, ensureDatabaseConnection, passportAuthenticateJwt, budgetRoutes);
 app.use(`${BASE_PATH}/currency`, ensureDatabaseConnection, passportAuthenticateJwt, currencyRoutes);
 
