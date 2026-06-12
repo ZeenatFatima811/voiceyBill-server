@@ -2,6 +2,8 @@ import TransactionModel, {
   TransactionTypeEnum,
 } from "../models/transaction.model";
 import { BadRequestException, NotFoundException } from "../utils/app-error";
+import BudgetModel from "../models/budget.model";
+import { ErrorCodeEnum } from "../enums/error-code.enum";
 import { calculateNextOccurrence } from "../utils/helper";
 import {
   CreateTransactionType,
@@ -22,7 +24,7 @@ const sanitizeAndValidatePagination = (
   pageSize: unknown,
   pageNumber: unknown,
 ): { pageSize: number; pageNumber: number } => {
-  const MAX_PAGE_SIZE = 100;
+  const MAX_PAGE_SIZE = 50000;
   const MAX_PAGE_NUMBER = 1000;
 
   // convert values
@@ -91,6 +93,65 @@ export const createTransactionService = async (
     body.currency,
   );
 
+  if (body.type === TransactionTypeEnum.EXPENSE) {
+    const transactionDate = new Date(body.date);
+    const month = transactionDate.getMonth() + 1;
+    const year = transactionDate.getFullYear();
+
+    const budget = await BudgetModel.findOne({
+      userId,
+      month,
+      year,
+    });
+
+    if (budget) {
+      // Calculate current total spent for this month/year
+      const startDate = new Date(year, month - 1, 1);
+      const endDate = new Date(year, month, 0, 23, 59, 59, 999);
+      const transactions = await TransactionModel.find({
+        userId,
+        type: TransactionTypeEnum.EXPENSE,
+        date: {
+          $gte: startDate,
+          $lte: endDate,
+        },
+      });
+
+      const totalSpent = transactions.reduce((sum, t) => sum + (typeof t.amount === 'number' ? t.amount : parseFloat(String(t.amount || 0))), 0);
+
+      if (totalSpent + currencyFields.amount > budget.totalBudget) {
+        const remaining = budget.totalBudget - totalSpent;
+        const remainingStr = remaining < 0 ? `-$${Math.abs(remaining).toFixed(2)}` : `$${remaining.toFixed(2)}`;
+        throw new BadRequestException(
+          `Transaction exceeds monthly budget of $${budget.totalBudget}. Remaining: ${remainingStr}`,
+          ErrorCodeEnum.BUDGET_INVALID_AMOUNT
+        );
+      }
+
+      // Check category limit
+      if (body.category) {
+        const normalizedCategory = body.category.trim().toLowerCase().replace(/\s+/g, "_");
+        const categoryLimit = budget.categoryLimits.find(
+          (c) => c.category.trim().toLowerCase().replace(/\s+/g, "_") === normalizedCategory
+        );
+        if (categoryLimit) {
+          const categorySpent = transactions
+            .filter((t) => t.category.trim().toLowerCase().replace(/\s+/g, "_") === normalizedCategory)
+            .reduce((sum, t) => sum + (typeof t.amount === 'number' ? t.amount : parseFloat(String(t.amount || 0))), 0);
+
+          if (categorySpent + currencyFields.amount > categoryLimit.limit) {
+            const remaining = categoryLimit.limit - categorySpent;
+            const remainingStr = remaining < 0 ? `-$${Math.abs(remaining).toFixed(2)}` : `$${remaining.toFixed(2)}`;
+            throw new BadRequestException(
+              `Transaction exceeds category limit for ${body.category}. Remaining: ${remainingStr}`,
+              ErrorCodeEnum.BUDGET_INVALID_AMOUNT
+            );
+          }
+        }
+      }
+    }
+  }
+
   const transaction = await TransactionModel.create({
     ...body,
     userId,
@@ -151,12 +212,40 @@ export const getAllTransactionService = async (
   }
 
   if (startDate || endDate) {
-    filterConditions.date = {};
-    if (startDate) filterConditions.date.$gte = new Date(startDate);
+    const start = startDate ? new Date(startDate) : null;
+    let end: Date | null = null;
     if (endDate) {
-      const end = new Date(endDate);
+      end = new Date(endDate);
       end.setHours(23, 59, 59, 999);
-      filterConditions.date.$lte = end;
+    }
+
+    const dateConditions: Record<string, any>[] = [];
+    const createdAtConditions: Record<string, any>[] = [];
+
+    if (start) {
+      dateConditions.push({ date: { $gte: start } });
+      createdAtConditions.push({ createdAt: { $gte: start } });
+    }
+    if (end) {
+      dateConditions.push({ date: { $lte: end } });
+      createdAtConditions.push({ createdAt: { $lte: end } });
+    }
+
+    const rangeCondition = {
+      $or: [
+        { $and: dateConditions },
+        { $and: createdAtConditions }
+      ]
+    };
+
+    if (filterConditions.$or) {
+      filterConditions.$and = [
+        { $or: filterConditions.$or },
+        rangeCondition
+      ];
+      delete filterConditions.$or;
+    } else {
+      filterConditions.$or = rangeCondition.$or;
     }
   }
 
@@ -308,6 +397,70 @@ export const updateTransactionService = async (
     };
   }
 
+  const targetType = body.type || existingTransaction.type;
+  if (targetType === TransactionTypeEnum.EXPENSE) {
+    const transactionDate = new Date(date);
+    const month = transactionDate.getMonth() + 1;
+    const year = transactionDate.getFullYear();
+
+    const budget = await BudgetModel.findOne({
+      userId,
+      month,
+      year,
+    });
+
+    if (budget) {
+      const targetAmount = currencyUpdate.amount !== undefined ? currencyUpdate.amount : existingTransaction.amount;
+
+      // Calculate current total spent for this month/year, excluding this transaction
+      const startDate = new Date(year, month - 1, 1);
+      const endDate = new Date(year, month, 0, 23, 59, 59, 999);
+      const transactions = await TransactionModel.find({
+        userId,
+        _id: { $ne: transactionId },
+        type: TransactionTypeEnum.EXPENSE,
+        date: {
+          $gte: startDate,
+          $lte: endDate,
+        },
+      });
+
+      const totalSpent = transactions.reduce((sum, t) => sum + (typeof t.amount === 'number' ? t.amount : parseFloat(String(t.amount || 0))), 0);
+
+      if (totalSpent + targetAmount > budget.totalBudget) {
+        const remaining = budget.totalBudget - totalSpent;
+        const remainingStr = remaining < 0 ? `-$${Math.abs(remaining).toFixed(2)}` : `$${remaining.toFixed(2)}`;
+        throw new BadRequestException(
+          `Transaction exceeds monthly budget of $${budget.totalBudget}. Remaining: ${remainingStr}`,
+          ErrorCodeEnum.BUDGET_INVALID_AMOUNT
+        );
+      }
+
+      // Check category limit
+      const category = body.category || existingTransaction.category;
+      if (category) {
+        const normalizedCategory = category.trim().toLowerCase().replace(/\s+/g, "_");
+        const categoryLimit = budget.categoryLimits.find(
+          (c) => c.category.trim().toLowerCase().replace(/\s+/g, "_") === normalizedCategory
+        );
+        if (categoryLimit) {
+          const categorySpent = transactions
+            .filter((t) => t.category.trim().toLowerCase().replace(/\s+/g, "_") === normalizedCategory)
+            .reduce((sum, t) => sum + (typeof t.amount === 'number' ? t.amount : parseFloat(String(t.amount || 0))), 0);
+
+          if (categorySpent + targetAmount > categoryLimit.limit) {
+            const remaining = categoryLimit.limit - categorySpent;
+            const remainingStr = remaining < 0 ? `-$${Math.abs(remaining).toFixed(2)}` : `$${remaining.toFixed(2)}`;
+            throw new BadRequestException(
+              `Transaction exceeds category limit for ${category}. Remaining: ${remainingStr}`,
+              ErrorCodeEnum.BUDGET_INVALID_AMOUNT
+            );
+          }
+        }
+      }
+    }
+  }
+
   existingTransaction.set({
     ...(body.title && { title: body.title }),
     ...(body.description && { description: body.description }),
@@ -382,6 +535,7 @@ export const bulkTransactionService = async (
             document: {
               ...tx,
               userId,
+              date: new Date(tx.date),
               amount: currencyFields.amount,
               originalAmount: currencyFields.originalAmount,
               originalCurrency: currencyFields.originalCurrency,
@@ -454,8 +608,8 @@ export const scanReceiptService = async (
 
     const currency =
       typeof data.currency === "string" &&
-      data.currency.trim().toUpperCase() !== "DEFAULT" &&
-      data.currency.trim().length === 3
+        data.currency.trim().toUpperCase() !== "DEFAULT" &&
+        data.currency.trim().length === 3
         ? data.currency.trim().toUpperCase()
         : undefined;
 
