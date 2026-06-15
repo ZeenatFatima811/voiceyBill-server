@@ -394,7 +394,7 @@ export const expensePieChartBreakdownService = async (
     },
     {
       $group: {
-        _id: "$category",
+        _id: { $toLower: "$category" },
         value: { $sum: { $abs: "$amount" } },
       },
     },
@@ -457,7 +457,7 @@ export const expensePieChartBreakdownService = async (
                           100,
                         ],
                       },
-                      0,
+                      2,
                     ],
                   },
                 ],
@@ -479,6 +479,7 @@ export const expensePieChartBreakdownService = async (
     totalSpent: convertToDollarUnit(data.totalSpent),
     breakdown: data.breakdown.map((item: any) => ({
       ...item,
+      name: item.name ? item.name.split(" ").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ") : "",
       value: convertToDollarUnit(item.value),
     })),
   };

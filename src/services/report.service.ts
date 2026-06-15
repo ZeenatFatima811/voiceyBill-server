@@ -131,7 +131,7 @@ export const generateReportService = async (
           },
           {
             $group: {
-              _id: "$category",
+              _id: { $toLower: "$category" },
               total: { $sum: { $abs: "$amount" } },
             },
           },
@@ -190,10 +190,11 @@ export const generateReportService = async (
 
   const byCategory = categories.reduce(
     (acc: any, { _id, total }: any) => {
-      acc[_id] = {
+      const name = _id ? _id.split(" ").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ") : "";
+      acc[name] = {
         amount: convertToDollarUnit(total),
         percentage:
-          totalExpenses > 0 ? Math.round((total / totalExpenses) * 100) : 0,
+          totalExpenses > 0 ? Number(((total / totalExpenses) * 100).toFixed(1)) : 0,
       };
       return acc;
     },
