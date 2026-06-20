@@ -17,6 +17,7 @@ export interface UserDocument extends Document {
   passwordResetOtpHash?: string | null;
   passwordResetOtpExpiresAt?: Date | null;
   lastOtpResentAt?: Date | null;
+  customCategories?: { value: string; label: string }[];
   createdAt: Date;
   updatedAt: Date;
   comparePassword: (password: string) => Promise<boolean>;
@@ -92,6 +93,15 @@ const userSchema = new Schema<UserDocument>(
       type: Date,
       select: false,
       default: null,
+    },
+    customCategories: {
+      type: [
+        {
+          value: { type: String, required: true, trim: true },
+          label: { type: String, required: true, trim: true },
+        },
+      ],
+      default: [],
     },
   },
   {

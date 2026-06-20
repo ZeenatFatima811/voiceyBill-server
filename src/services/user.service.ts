@@ -32,6 +32,7 @@ export const updateUserService = async (
   user.set({
     ...(body.name && { name: body.name }),
     ...(nextBaseCurrency && { baseCurrency: nextBaseCurrency }),
+    ...(body.customCategories && { customCategories: body.customCategories }),
   });
 
   if (nextBaseCurrency && nextBaseCurrency !== previousBaseCurrency) {
