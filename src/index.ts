@@ -8,6 +8,7 @@ import { Env } from "./config/env.config";
 import { HTTPSTATUS } from "./config/http.config";
 import { errorHandler } from "./middlewares/errorHandler.middleware";
 import { asyncHandler } from "./middlewares/asyncHandler.middlerware";
+import { performanceLogger } from "./middlewares/performanceLogger.middleware";
 import { ensureDatabaseConnection } from "./config/database.config";
 import authRoutes from "./routes/auth.route";
 import { passportAuthenticateJwt } from "./config/passport.config";
@@ -23,6 +24,10 @@ import currencyRoutes from "./routes/currency.route";
 
 const app = express();
 const BASE_PATH = Env.BASE_PATH;
+
+// PERF: response-time instrumentation must wrap every request — register first,
+// before body parsing and routes, so it captures the full request lifetime.
+app.use(performanceLogger);
 
 const allowedOrigins = new Set(
   [

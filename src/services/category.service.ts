@@ -6,6 +6,14 @@ import {
   UpdateCategoryType,
 } from "../validators/category.validator";
 
+// Junk values that should never be treated as a real category.
+const RESERVED_CATEGORY_NAMES = ["undefined", "null", "uncategorized"];
+
+const isValidCategoryName = (name?: string | null): boolean => {
+  const normalized = (name ?? "").trim().toLowerCase();
+  return normalized.length > 0 && !RESERVED_CATEGORY_NAMES.includes(normalized);
+};
+
 const DEFAULT_CATEGORIES = [
   { name: "Groceries", color: "#22C55E" },
   { name: "Dining & Restaurants", color: "#F97316" },
@@ -35,7 +43,22 @@ export const getCategoriesService = async (userId: string) => {
     );
   }
 
-  return CategoryModel.find({ userId }).sort({ isDefault: -1, name: 1 });
+  const categories = await CategoryModel.find({ userId }).sort({
+    isDefault: -1,
+    name: 1,
+  });
+
+  // Self-heal: purge any junk categories that leaked in from older clients
+  // (e.g. a category literally named "undefined") so they never show again.
+  const junkIds = categories
+    .filter((cat) => !isValidCategoryName(cat.name))
+    .map((cat) => cat._id);
+
+  if (junkIds.length) {
+    await CategoryModel.deleteMany({ _id: { $in: junkIds } });
+  }
+
+  return categories.filter((cat) => isValidCategoryName(cat.name));
 };
 
 export const createCategoryService = async (

@@ -115,7 +115,7 @@ export const createTransactionService = async (
           $gte: startDate,
           $lte: endDate,
         },
-      });
+      }).select("amount category"); // PERF: only the fields the budget sum needs
 
       const totalSpent = transactions.reduce((sum, t) => sum + (typeof t.amount === 'number' ? t.amount : parseFloat(String(t.amount || 0))), 0);
 
@@ -423,7 +423,7 @@ export const updateTransactionService = async (
           $gte: startDate,
           $lte: endDate,
         },
-      });
+      }).select("amount category"); // PERF: only the fields the budget sum needs
 
       const totalSpent = transactions.reduce((sum, t) => sum + (typeof t.amount === 'number' ? t.amount : parseFloat(String(t.amount || 0))), 0);
 
