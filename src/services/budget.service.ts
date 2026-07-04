@@ -15,22 +15,7 @@ import {
 import { toBudgetSummaryDTO, BudgetSummaryDTO } from "../dto/budget.dto";
 import { sendBudgetAlertEmail } from "../mailers/budget-alert.mailer";
 import { sendBudgetIncreaseEmail } from "../mailers/budget-increase.mailer";
-
-// Valid categories that users can set budgets for
-const VALID_CATEGORIES = [
-  "groceries",
-  "dining",
-  "transportation",
-  "utilities",
-  "entertainment",
-  "shopping",
-  "healthcare",
-  "travel",
-  "housing",
-  "income",
-  "investments",
-  "other",
-];
+import { getUserCategoryNames } from "./category.service";
 
 /**
  * Validate that the month/year is not too far in the future
@@ -52,23 +37,6 @@ function validateMonthYear(month: number, year: number): void {
       "Cannot create budgets more than 6 months in the future",
       ErrorCodeEnum.VALIDATION_ERROR
     );
-  }
-}
-
-/**
- * Validate that all categories are in the allowed list
- */
-function validateCategories(
-  categoryLimits: Array<{ category: string; limit: number }>,
-  allowedCategories: string[]
-): void {
-  for (const limit of categoryLimits) {
-    if (!allowedCategories.includes(limit.category)) {
-      throw new BadRequestException(
-        `Invalid category: ${limit.category}. Valid categories are: ${allowedCategories.join(", ")}`,
-        ErrorCodeEnum.VALIDATION_ERROR
-      );
-    }
   }
 }
 
@@ -97,41 +65,21 @@ export async function createOrUpdateBudget(
   // Validate month/year
   validateMonthYear(month, year);
 
-  // Validate categories — include user's custom categories as allowed
-  // Load user document (mutable) so we can persist new custom categories if needed
-  const user = await UserModel.findById(userId);
-  const userCustom = (user && (user as any).customCategories) || [];
-
-  // If client included new categories that are not in VALID_CATEGORIES and not yet persisted,
-  // persist them as custom categories (safe: only allow simple slug-like names)
-  const userCustomValues = userCustom.map((c: any) => c.value);
-  const incomingValues = categoryLimits.map((c) => String(c.category).trim());
-
-  const safeNewValues = incomingValues.filter((val) => {
-    if (VALID_CATEGORIES.includes(val)) return false;
-    if (userCustomValues.includes(val)) return false;
-    // allow only alphanumeric, underscore and hyphen to be auto-added
-    return /^[a-z0-9_\-]+$/i.test(val);
-  });
-
-  if (safeNewValues.length > 0 && user) {
-    for (const val of safeNewValues) {
-      const existing = (user as any).customCategories || [];
-      const label = String(val).replace(/[_\-]+/g, " ").replace(/\b\w/g, (m: string) => m.toUpperCase());
-      existing.push({ value: val, label });
-      (user as any).customCategories = existing;
-    }
-    try {
-      await user.save();
-    } catch (e) {
-      // If saving custom categories fails, proceed without persisting — validation below will still include them in allowed list
-      console.warn('Failed to persist new custom categories', e);
+  // Validate categories against the user's real categories (default + custom
+  // from the Category collection — the single source of truth). Matching is
+  // case-insensitive so budget categories line up with transaction categories.
+  const allowedNames = await getUserCategoryNames(userId);
+  const allowedNormalized = new Set(
+    allowedNames.map((name) => name.trim().toLowerCase())
+  );
+  for (const limit of categoryLimits) {
+    if (!allowedNormalized.has(String(limit.category).trim().toLowerCase())) {
+      throw new BadRequestException(
+        `Invalid category: ${limit.category}. Add it in Account → Categories first.`,
+        ErrorCodeEnum.VALIDATION_ERROR
+      );
     }
   }
-
-  const updatedUserCustom = (user && (user as any).customCategories) || [];
-  const allowed = Array.from(new Set([...VALID_CATEGORIES, ...updatedUserCustom.map((c: any) => c.value), ...incomingValues]));
-  validateCategories(categoryLimits, allowed);
 
   // Validate category sum doesn't exceed total
   validateCategorySum(totalBudget, categoryLimits);
