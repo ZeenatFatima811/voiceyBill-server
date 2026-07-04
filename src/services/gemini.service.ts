@@ -17,8 +17,9 @@ export class OpenAIClassificationService {
     }
   }
 
-  private getClassificationPrompt(): string {
+  private getClassificationPrompt(categories: string[]): string {
     const currentDate = new Date().toISOString().split("T")[0];
+    const categoryList = categories.length ? categories : voiceConfig.categories;
 
     return `You are a financial assistant that helps users classify voice-transcribed financial transactions. The transcription may be in any language — English, Spanish, French, Arabic, Urdu, Hindi, or any other. Understand the meaning regardless of the language and extract the transaction details in English.
 
@@ -29,7 +30,7 @@ Analyze the transcribed text and extract transaction details matching this exact
   "currency": "string",       // ISO 4217 currency code detected from speech. If no currency is mentioned, use "DEFAULT"
   "date": "ISO date string",  // Transaction date in YYYY-MM-DD format (default to today if not specified)
   "description": "string",    // Additional details from the transcription
-  "category": "string",       // One of: ${voiceConfig.categories.join(", ")}
+  "category": "string",       // Must be exactly one of: ${categoryList.join(", ")}
   "type": "string",           // Either "INCOME" or "EXPENSE"
   "paymentMethod": "string",  // One of: ${voiceConfig.payment_methods.join(", ")}
   "confidence": number        // Your confidence in this classification (0-1)
@@ -38,7 +39,7 @@ Analyze the transcribed text and extract transaction details matching this exact
 Rules:
 1. Amount must be positive
 2. Date should be today's date if not specified: ${currentDate}
-3. Category must be one of the predefined categories
+3. Category must be exactly one of the predefined categories (pick the closest match)
 4. Type should be "EXPENSE" for spending, "INCOME" for earnings
 5. Payment method should be inferred from context or default to "CASH"
 6. Confidence should reflect how certain you are about the classification
@@ -47,7 +48,10 @@ Rules:
 Output only valid JSON. Do not include any explanation or markdown.`;
   }
 
-  async classifyTransaction(transcription: string): Promise<TransactionData> {
+  async classifyTransaction(
+    transcription: string,
+    categories: string[] = []
+  ): Promise<TransactionData> {
     if (!this.client) {
       throw new AppError("OpenAI not configured", 500);
     }
@@ -62,7 +66,7 @@ Output only valid JSON. Do not include any explanation or markdown.`;
         messages: [
           {
             role: "user",
-            content: `${this.getClassificationPrompt()}\n\nTranscribed text: ${transcription}`,
+            content: `${this.getClassificationPrompt(categories)}\n\nTranscribed text: ${transcription}`,
           },
         ],
         response_format: { type: "json_object" },
@@ -74,13 +78,16 @@ Output only valid JSON. Do not include any explanation or markdown.`;
       if (!content) throw new Error("Empty response from OpenAI");
 
       const data = JSON.parse(content);
-      return this.validateAndCleanData(data) as TransactionData;
+      return this.validateAndCleanData(data, categories) as TransactionData;
     } catch (error: any) {
       throw new AppError(`Classification failed: ${error.message}`, 500);
     }
   }
 
-  private validateAndCleanData(data: any): TransactionData {
+  private validateAndCleanData(
+    data: any,
+    categories: string[] = []
+  ): TransactionData {
     const requiredFields = ["title", "amount", "date", "category", "type", "paymentMethod"];
 
     for (const field of requiredFields) {
@@ -99,7 +106,19 @@ Output only valid JSON. Do not include any explanation or markdown.`;
       data.date = new Date().toISOString().split("T")[0];
     }
 
-    if (!voiceConfig.categories.includes(data.category)) data.category = "other";
+    // Map the AI's category onto one of the user's real categories (default +
+    // custom), preserving the canonical name/casing. Falls back to "Other".
+    const allowedCategories = categories.length
+      ? categories
+      : voiceConfig.categories;
+    const matchedCategory = allowedCategories.find(
+      (c) => c.toLowerCase() === String(data.category ?? "").toLowerCase()
+    );
+    data.category =
+      matchedCategory ??
+      allowedCategories.find((c) => c.toLowerCase() === "other") ??
+      "Other";
+
     if (!voiceConfig.payment_methods.includes(data.paymentMethod)) data.paymentMethod = "CASH";
     if (!["INCOME", "EXPENSE"].includes(data.type)) data.type = "EXPENSE";
 

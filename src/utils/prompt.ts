@@ -1,6 +1,12 @@
 import { PaymentMethodEnum } from "../models/transaction.model";
 import { voiceConfig } from "../config/voice.config";
-export const receiptPrompt = `
+
+// Builds the receipt-scan prompt for a specific user. `categories` are the
+// user's real categories (default + custom); when empty we fall back to the
+// generic list so the prompt is still valid.
+export const receiptPrompt = (categories: string[] = []) => {
+  const categoryList = categories.length ? categories : voiceConfig.categories;
+  return `
 You are a financial assistant that helps users analyze and extract transaction details from receipt image (base64 encoded)
 Analyze this receipt image (base64 encoded) and extract transaction details matching this exact JSON format:
 {
@@ -9,7 +15,7 @@ Analyze this receipt image (base64 encoded) and extract transaction details matc
   "currency": "string",       // ISO 4217 currency code detected from receipt. If no currency is visible, use "DEFAULT"
   "date": "ISO date string",  // Transaction date in YYYY-MM-DD format
   "description": "string",    // Items purchased summary (max 50 words)
-  "category": "string",       // Category of the transaction. Must be one of: ${voiceConfig.categories.join(", ")}
+  "category": "string",       // Category of the transaction. Must be exactly one of: ${categoryList.join(", ")}
   "type": "EXPENSE",           // Always "EXPENSE" for receipts
   "paymentMethod": "string",  // One of: ${Object.values(PaymentMethodEnum).join(",")}
 }
@@ -17,7 +23,7 @@ Analyze this receipt image (base64 encoded) and extract transaction details matc
 Rules:
 1. Amount must be positive
 2. Date must be valid and in ISO format
-3. Category must be one of the specified allowed values
+3. Category must be exactly one of the specified allowed values (pick the closest match)
 4. Detect currency from symbols/codes when visible: $ -> USD, € -> EUR, £ -> GBP, ₹ -> INR, Rs/PKR -> PKR
 5. If uncertain about currency, use "DEFAULT"
 6. If uncertain about any other field, omit it
@@ -30,11 +36,12 @@ Example valid response:
   "currency": "USD",
   "date": "2025-05-08",
   "description": "Groceries: milk, eggs, bread",
-  "category": "groceries",
+  "category": "${categoryList[0] ?? "Groceries"}",
   "paymentMethod": "CARD",
   "type": "EXPENSE"
 }
 `;
+};
 
 export const reportInsightPrompt = ({
   totalIncome,

@@ -6,6 +6,7 @@ import os from "os";
 import { UpliftAIService } from "../services/uplift.service";
 import { GeminiClassificationService } from "../services/gemini.service";
 import { voiceConfig } from "../config/voice.config";
+import { getUserCategoryNames } from "../services/category.service";
 import { AppError } from "../utils/app-error";
 import { asyncHandler } from "../middlewares/asyncHandler.middlerware";
 import { HTTPSTATUS } from "../config/http.config";
@@ -70,6 +71,19 @@ export const processVoiceTransaction = asyncHandler(
 
       console.log("Starting transcription...");
 
+      // Load the user's categories (default + custom) so the AI classifies the
+      // transaction into one of them instead of a hardcoded list.
+      const userId = req.user?._id;
+      let userCategories: string[] = [];
+      try {
+        if (userId) userCategories = await getUserCategoryNames(userId);
+      } catch (err) {
+        console.warn(
+          "Failed to load user categories for voice classification:",
+          err
+        );
+      }
+
       // Set overall timeout for the entire process (45 seconds for Vercel Pro)
       const overallTimeout = new Promise((_, reject) =>
         setTimeout(
@@ -101,7 +115,8 @@ export const processVoiceTransaction = asyncHandler(
 
         console.log("Starting classification...");
         const transactionData = await geminiService.classifyTransaction(
-          transcriptionResult.text
+          transcriptionResult.text,
+          userCategories
         );
 
         console.log(`Processing successful: ${transactionData.title}`);
