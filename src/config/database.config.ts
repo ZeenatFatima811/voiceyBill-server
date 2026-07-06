@@ -25,6 +25,32 @@ import { NextFunction, Request, Response } from "express";
 
 // export default connctDatabase;
 
+// One-time legacy migration guard. New bulk imports already store real Date
+// objects, so this only exists to heal old string-date rows. It must run at most
+// once per process and, crucially, must NOT block the connection path — the
+// `{ date: { $type: "string" } }` filter is a full collection scan, and running
+// it on every serverless cold start added that scan to first-request latency.
+let legacyDateMigrationStarted = false;
+const runLegacyDateMigrationOnce = async () => {
+  if (legacyDateMigrationStarted) return;
+  legacyDateMigrationStarted = true;
+  try {
+    const db = mongoose.connection.db;
+    if (!db) return;
+    const result = await db.collection("transactions").updateMany(
+      { date: { $type: "string" } },
+      [{ $set: { date: { $toDate: "$date" } } }]
+    );
+    if (result.modifiedCount > 0) {
+      console.log(
+        `Converted ${result.modifiedCount} legacy string transactions to Date objects.`
+      );
+    }
+  } catch (migrationErr) {
+    console.error("Failed to run string date migration:", migrationErr);
+  }
+};
+
 const connectDbWithRetry = async (dbURI: string, maxRetries: number) => {
   if (mongoose.connection.readyState === 1) {
     return;
@@ -47,27 +73,9 @@ const connectDbWithRetry = async (dbURI: string, maxRetries: number) => {
       });
       console.log("Connected to MongoDB");
 
-      // One-time migration to convert string dates to Date objects for legacy bulk imports
-      try {
-        const db = mongoose.connection.db;
-        if (db) {
-          const result = await db.collection("transactions").updateMany(
-            { date: { $type: "string" } },
-            [
-              {
-                $set: {
-                  date: { $toDate: "$date" }
-                }
-              }
-            ]
-          );
-          if (result.modifiedCount > 0) {
-            console.log(`Converted ${result.modifiedCount} legacy string transactions to Date objects.`);
-          }
-        }
-      } catch (migrationErr) {
-        console.error("Failed to run string date migration:", migrationErr);
-      }
+      // Fire-and-forget: heal legacy string dates in the background so the
+      // connection (and the first request behind it) isn't blocked by a scan.
+      void runLegacyDateMigrationOnce();
 
       break;
     } catch (err) {
