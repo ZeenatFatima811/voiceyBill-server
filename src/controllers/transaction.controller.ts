@@ -20,6 +20,7 @@ import {
   updateTransactionService,
 } from "../services/transaction.service";
 import { TransactionTypeEnum } from "../models/transaction.model";
+import { getUserCategoryNames } from "../services/category.service";
 // import Transaction from "../models/transaction.model";
 
 export const createTransactionController = asyncHandler(
@@ -154,8 +155,18 @@ export const bulkTransactionController = asyncHandler(
 export const scanReceiptController = asyncHandler(
   async (req: Request, res: Response) => {
     const file = req?.file;
+    const userId = req.user?._id;
 
-    const result = await scanReceiptService(file);
+    // Load the user's categories (default + custom) so the receipt scan maps to
+    // one of them instead of a hardcoded list.
+    let categories: string[] = [];
+    try {
+      if (userId) categories = await getUserCategoryNames(userId);
+    } catch (err) {
+      console.warn("Failed to load user categories for receipt scan:", err);
+    }
+
+    const result = await scanReceiptService(file, categories);
 
     return res.status(HTTPSTATUS.OK).json({
       message: "Receipt scanned successfully",

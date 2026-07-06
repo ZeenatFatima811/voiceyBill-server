@@ -11,6 +11,7 @@ import {
 } from "../validators/transaction.validator";
 import { openai, openAIModel } from "../config/openai.config";
 import { receiptPrompt } from "../utils/prompt";
+import { voiceConfig } from "../config/voice.config";
 import { resolveUserCurrencyConversion } from "./currency-conversion.service";
 import UserModel from "../models/user.model";
 import { resolveCurrencyConversion } from "./currency-conversion.service";
@@ -570,6 +571,7 @@ export const bulkTransactionService = async (
 
 export const scanReceiptService = async (
   file: Express.Multer.File | undefined,
+  categories: string[] = [],
 ) => {
   if (!file) {
     throw new BadRequestException("No file uploaded");
@@ -585,7 +587,7 @@ export const scanReceiptService = async (
         {
           role: "user",
           content: [
-            { type: "text", text: receiptPrompt },
+            { type: "text", text: receiptPrompt(categories) },
             { type: "image_url", image_url: { url: file.path } },
           ],
         },
@@ -613,29 +615,20 @@ export const scanReceiptService = async (
         ? data.currency.trim().toUpperCase()
         : undefined;
 
-    let category =
-      typeof data.category === "string"
-        ? data.category.toLowerCase().trim()
-        : "other";
-
-    const allowedCategories = [
-      "groceries",
-      "dining & restaurants",
-      "transportation",
-      "utilities",
-      "entertainment",
-      "shopping",
-      "healthcare",
-      "travel",
-      "housing & rent",
-      "income",
-      "investments",
-      "other",
-    ];
-
-    if (!allowedCategories.includes(category)) {
-      category = "other";
-    }
+    // Map the AI's category onto one of the user's real categories (default +
+    // custom), preserving the canonical name/casing. Falls back to "Other".
+    const rawCategory =
+      typeof data.category === "string" ? data.category.trim() : "";
+    const allowedCategories = categories.length
+      ? categories
+      : voiceConfig.categories;
+    const matchedCategory = allowedCategories.find(
+      (c) => c.toLowerCase() === rawCategory.toLowerCase(),
+    );
+    const category =
+      matchedCategory ??
+      allowedCategories.find((c) => c.toLowerCase() === "other") ??
+      "Other";
 
     return {
       title: data.title || "Receipt",

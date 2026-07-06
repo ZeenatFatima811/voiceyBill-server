@@ -113,7 +113,9 @@ export async function toBudgetSummaryDTO(
       }
 
       return {
-        name: categoryName,
+        // Return the original (display) category name; `categoryName` is only
+        // the normalized key used above to match transaction spending.
+        name: categoryLimit.category,
         limit: categoryLimit.limit,
         spent,
         remaining,

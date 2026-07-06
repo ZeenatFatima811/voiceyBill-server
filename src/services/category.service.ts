@@ -61,6 +61,18 @@ export const getCategoriesService = async (userId: string) => {
   return categories.filter((cat) => isValidCategoryName(cat.name));
 };
 
+/**
+ * Returns the user's category names (default + custom), seeding defaults if the
+ * user has none yet. Used to feed the voice/receipt AI classifier so it maps
+ * transactions to the user's real categories instead of a hardcoded list.
+ */
+export const getUserCategoryNames = async (
+  userId: string
+): Promise<string[]> => {
+  const categories = await getCategoriesService(userId);
+  return categories.map((cat) => cat.name);
+};
+
 export const createCategoryService = async (
   userId: string,
   body: CreateCategoryType

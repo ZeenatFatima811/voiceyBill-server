@@ -162,6 +162,14 @@ const transactionSchema = new Schema<TransactionDocument>(
 // analytics/reports = match userId + date range.
 transactionSchema.index({ userId: 1, createdAt: -1 });
 transactionSchema.index({ userId: 1, date: -1 });
+// PERF: the daily recurring-transactions cron scans for due recurring rows
+// across ALL users. A partial index over only the recurring rows turns that
+// full-collection scan into a tiny index scan, with near-zero write cost since
+// it indexes only the (few) recurring transactions.
+transactionSchema.index(
+  { nextRecurringDate: 1 },
+  { partialFilterExpression: { isRecurring: true } }
+);
 
 const TransactionModel = mongoose.model<TransactionDocument>(
   "Transaction",
