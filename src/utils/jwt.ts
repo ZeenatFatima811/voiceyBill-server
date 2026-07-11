@@ -10,6 +10,12 @@ export type AccessTokenPayload = {
 
 export type RefreshTokenPayload = {
   userId: string;
+  /**
+   * Matches the user's current tokenVersion; bumping the user's version
+   * revokes every previously issued refresh token. Absent on tokens issued
+   * before this field existed — treated as version 0 for backward compat.
+   */
+  tokenVersion?: number;
 };
 
 type SignOptsAndSecret = SignOptions & {
@@ -75,5 +81,5 @@ export const verifyRefreshToken = (token: string): RefreshTokenPayload => {
     throw new jwt.JsonWebTokenError("Missing userId in refresh token payload");
   }
 
-  return { userId: decoded.userId };
+  return { userId: decoded.userId, tokenVersion: decoded.tokenVersion };
 };

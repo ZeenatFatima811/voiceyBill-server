@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import TransactionModel, {
   TransactionTypeEnum,
 } from "../models/transaction.model";
@@ -94,66 +95,7 @@ export const createTransactionService = async (
     body.currency,
   );
 
-  if (body.type === TransactionTypeEnum.EXPENSE) {
-    const transactionDate = new Date(body.date);
-    const month = transactionDate.getMonth() + 1;
-    const year = transactionDate.getFullYear();
-
-    const budget = await BudgetModel.findOne({
-      userId,
-      month,
-      year,
-    });
-
-    if (budget) {
-      // Calculate current total spent for this month/year
-      const startDate = new Date(year, month - 1, 1);
-      const endDate = new Date(year, month, 0, 23, 59, 59, 999);
-      const transactions = await TransactionModel.find({
-        userId,
-        type: TransactionTypeEnum.EXPENSE,
-        date: {
-          $gte: startDate,
-          $lte: endDate,
-        },
-      }).select("amount category"); // PERF: only the fields the budget sum needs
-
-      const totalSpent = transactions.reduce((sum, t) => sum + (typeof t.amount === 'number' ? t.amount : parseFloat(String(t.amount || 0))), 0);
-
-      if (totalSpent + currencyFields.amount > budget.totalBudget) {
-        const remaining = budget.totalBudget - totalSpent;
-        const remainingStr = remaining < 0 ? `-$${Math.abs(remaining).toFixed(2)}` : `$${remaining.toFixed(2)}`;
-        throw new BadRequestException(
-          `Transaction exceeds monthly budget of $${budget.totalBudget}. Remaining: ${remainingStr}`,
-          ErrorCodeEnum.BUDGET_INVALID_AMOUNT
-        );
-      }
-
-      // Check category limit
-      if (body.category) {
-        const normalizedCategory = body.category.trim().toLowerCase().replace(/\s+/g, "_");
-        const categoryLimit = budget.categoryLimits.find(
-          (c) => c.category.trim().toLowerCase().replace(/\s+/g, "_") === normalizedCategory
-        );
-        if (categoryLimit) {
-          const categorySpent = transactions
-            .filter((t) => t.category.trim().toLowerCase().replace(/\s+/g, "_") === normalizedCategory)
-            .reduce((sum, t) => sum + (typeof t.amount === 'number' ? t.amount : parseFloat(String(t.amount || 0))), 0);
-
-          if (categorySpent + currencyFields.amount > categoryLimit.limit) {
-            const remaining = categoryLimit.limit - categorySpent;
-            const remainingStr = remaining < 0 ? `-$${Math.abs(remaining).toFixed(2)}` : `$${remaining.toFixed(2)}`;
-            throw new BadRequestException(
-              `Transaction exceeds category limit for ${body.category}. Remaining: ${remainingStr}`,
-              ErrorCodeEnum.BUDGET_INVALID_AMOUNT
-            );
-          }
-        }
-      }
-    }
-  }
-
-  const transaction = await TransactionModel.create({
+  const transactionDoc = {
     ...body,
     userId,
     category: body.category,
@@ -168,9 +110,112 @@ export const createTransactionService = async (
     recurringInterval: body.recurringInterval || null,
     nextRecurringDate,
     lastProcessed: null,
-  });
+  };
 
-  return transaction;
+  if (body.type !== TransactionTypeEnum.EXPENSE) {
+    return TransactionModel.create(transactionDoc);
+  }
+
+  // Expense: validate against the budget and insert atomically. Without a
+  // transaction, two concurrent expense writes can both read the same spend
+  // total, both pass validation, and jointly exceed the budget (check-then-act
+  // race). Snapshot reads + the insert now commit together; a validation
+  // failure aborts the transaction. Requires a replica set (all Atlas tiers).
+  const session = await mongoose.startSession();
+  try {
+    let created: Awaited<ReturnType<typeof TransactionModel.create>>[number] | undefined;
+
+    await session.withTransaction(async () => {
+      await validateExpenseAgainstBudget(
+        userId,
+        new Date(body.date),
+        currencyFields.amount,
+        body.category,
+        session,
+      );
+
+      const [doc] = await TransactionModel.create([transactionDoc], { session });
+      created = doc;
+    });
+
+    return created!;
+  } finally {
+    await session.endSession();
+  }
+};
+
+/**
+ * Throws BUDGET_INVALID_AMOUNT when adding `amount` would exceed the monthly
+ * budget or the matching category limit. `excludeTransactionId` omits the
+ * transaction being updated from the current-spend calculation. All reads run
+ * inside the caller's session so validation and write commit atomically.
+ */
+const validateExpenseAgainstBudget = async (
+  userId: string,
+  transactionDate: Date,
+  amount: number,
+  category: string | undefined,
+  session: mongoose.ClientSession,
+  excludeTransactionId?: string,
+) => {
+  const month = transactionDate.getMonth() + 1;
+  const year = transactionDate.getFullYear();
+
+  const budget = await BudgetModel.findOne({
+    userId,
+    month,
+    year,
+  }).session(session);
+
+  if (!budget) return;
+
+  // Calculate current total spent for this month/year
+  const startDate = new Date(year, month - 1, 1);
+  const endDate = new Date(year, month, 0, 23, 59, 59, 999);
+  const transactions = await TransactionModel.find({
+    userId,
+    ...(excludeTransactionId && { _id: { $ne: excludeTransactionId } }),
+    type: TransactionTypeEnum.EXPENSE,
+    date: {
+      $gte: startDate,
+      $lte: endDate,
+    },
+  })
+    .select("amount category") // PERF: only the fields the budget sum needs
+    .session(session);
+
+  const totalSpent = transactions.reduce((sum, t) => sum + (typeof t.amount === 'number' ? t.amount : parseFloat(String(t.amount || 0))), 0);
+
+  if (totalSpent + amount > budget.totalBudget) {
+    const remaining = budget.totalBudget - totalSpent;
+    const remainingStr = remaining < 0 ? `-$${Math.abs(remaining).toFixed(2)}` : `$${remaining.toFixed(2)}`;
+    throw new BadRequestException(
+      `Transaction exceeds monthly budget of $${budget.totalBudget}. Remaining: ${remainingStr}`,
+      ErrorCodeEnum.BUDGET_INVALID_AMOUNT
+    );
+  }
+
+  // Check category limit
+  if (category) {
+    const normalizedCategory = category.trim().toLowerCase().replace(/\s+/g, "_");
+    const categoryLimit = budget.categoryLimits.find(
+      (c) => c.category.trim().toLowerCase().replace(/\s+/g, "_") === normalizedCategory
+    );
+    if (categoryLimit) {
+      const categorySpent = transactions
+        .filter((t) => t.category.trim().toLowerCase().replace(/\s+/g, "_") === normalizedCategory)
+        .reduce((sum, t) => sum + (typeof t.amount === 'number' ? t.amount : parseFloat(String(t.amount || 0))), 0);
+
+      if (categorySpent + amount > categoryLimit.limit) {
+        const remaining = categoryLimit.limit - categorySpent;
+        const remainingStr = remaining < 0 ? `-$${Math.abs(remaining).toFixed(2)}` : `$${remaining.toFixed(2)}`;
+        throw new BadRequestException(
+          `Transaction exceeds category limit for ${category}. Remaining: ${remainingStr}`,
+          ErrorCodeEnum.BUDGET_INVALID_AMOUNT
+        );
+      }
+    }
+  }
 };
 
 export const getAllTransactionService = async (
@@ -399,83 +444,50 @@ export const updateTransactionService = async (
   }
 
   const targetType = body.type || existingTransaction.type;
-  if (targetType === TransactionTypeEnum.EXPENSE) {
-    const transactionDate = new Date(date);
-    const month = transactionDate.getMonth() + 1;
-    const year = transactionDate.getFullYear();
 
-    const budget = await BudgetModel.findOne({
-      userId,
-      month,
-      year,
+  const applyUpdate = async (session?: mongoose.ClientSession) => {
+    existingTransaction.set({
+      ...(body.title && { title: body.title }),
+      ...(body.description && { description: body.description }),
+      ...(body.category && { category: body.category }),
+      ...(body.type && { type: body.type }),
+      ...(body.paymentMethod && { paymentMethod: body.paymentMethod }),
+      ...currencyUpdate,
+      date,
+      isRecurring,
+      recurringInterval,
+      nextRecurringDate,
     });
+    await existingTransaction.save({ session });
+  };
 
-    if (budget) {
-      const targetAmount = currencyUpdate.amount !== undefined ? currencyUpdate.amount : existingTransaction.amount;
-
-      // Calculate current total spent for this month/year, excluding this transaction
-      const startDate = new Date(year, month - 1, 1);
-      const endDate = new Date(year, month, 0, 23, 59, 59, 999);
-      const transactions = await TransactionModel.find({
-        userId,
-        _id: { $ne: transactionId },
-        type: TransactionTypeEnum.EXPENSE,
-        date: {
-          $gte: startDate,
-          $lte: endDate,
-        },
-      }).select("amount category"); // PERF: only the fields the budget sum needs
-
-      const totalSpent = transactions.reduce((sum, t) => sum + (typeof t.amount === 'number' ? t.amount : parseFloat(String(t.amount || 0))), 0);
-
-      if (totalSpent + targetAmount > budget.totalBudget) {
-        const remaining = budget.totalBudget - totalSpent;
-        const remainingStr = remaining < 0 ? `-$${Math.abs(remaining).toFixed(2)}` : `$${remaining.toFixed(2)}`;
-        throw new BadRequestException(
-          `Transaction exceeds monthly budget of $${budget.totalBudget}. Remaining: ${remainingStr}`,
-          ErrorCodeEnum.BUDGET_INVALID_AMOUNT
-        );
-      }
-
-      // Check category limit
-      const category = body.category || existingTransaction.category;
-      if (category) {
-        const normalizedCategory = category.trim().toLowerCase().replace(/\s+/g, "_");
-        const categoryLimit = budget.categoryLimits.find(
-          (c) => c.category.trim().toLowerCase().replace(/\s+/g, "_") === normalizedCategory
-        );
-        if (categoryLimit) {
-          const categorySpent = transactions
-            .filter((t) => t.category.trim().toLowerCase().replace(/\s+/g, "_") === normalizedCategory)
-            .reduce((sum, t) => sum + (typeof t.amount === 'number' ? t.amount : parseFloat(String(t.amount || 0))), 0);
-
-          if (categorySpent + targetAmount > categoryLimit.limit) {
-            const remaining = categoryLimit.limit - categorySpent;
-            const remainingStr = remaining < 0 ? `-$${Math.abs(remaining).toFixed(2)}` : `$${remaining.toFixed(2)}`;
-            throw new BadRequestException(
-              `Transaction exceeds category limit for ${category}. Remaining: ${remainingStr}`,
-              ErrorCodeEnum.BUDGET_INVALID_AMOUNT
-            );
-          }
-        }
-      }
-    }
+  if (targetType !== TransactionTypeEnum.EXPENSE) {
+    await applyUpdate();
+    return;
   }
 
-  existingTransaction.set({
-    ...(body.title && { title: body.title }),
-    ...(body.description && { description: body.description }),
-    ...(body.category && { category: body.category }),
-    ...(body.type && { type: body.type }),
-    ...(body.paymentMethod && { paymentMethod: body.paymentMethod }),
-    ...currencyUpdate,
-    date,
-    isRecurring,
-    recurringInterval,
-    nextRecurringDate,
-  });
+  // Same check-then-act protection as create: validate + save atomically.
+  const targetAmount =
+    currencyUpdate.amount !== undefined
+      ? currencyUpdate.amount
+      : existingTransaction.amount;
 
-  await existingTransaction.save();
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      await validateExpenseAgainstBudget(
+        userId,
+        new Date(date),
+        targetAmount,
+        body.category || existingTransaction.category,
+        session,
+        transactionId,
+      );
+      await applyUpdate(session);
+    });
+  } finally {
+    await session.endSession();
+  }
 
   return;
 };

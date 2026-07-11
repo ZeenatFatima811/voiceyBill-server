@@ -179,7 +179,10 @@ export const loginService = async (body: LoginSchemaType) => {
   }
 
   const { token, expiresAt } = signJwtToken({ userId: user.id });
-  const refreshToken = signRefreshToken({ userId: user.id });
+  const refreshToken = signRefreshToken({
+    userId: user.id,
+    tokenVersion: user.tokenVersion ?? 0,
+  });
 
   const reportSetting = await ReportSettingModel.findOne(
     { userId: user.id },
@@ -261,7 +264,10 @@ export const verifyOtpService = async (body: VerifyOtpSchemaType) => {
 
   // Auto-login: Generate JWT tokens
   const { token, expiresAt } = signJwtToken({ userId: verificationUser.id });
-  const refreshToken = signRefreshToken({ userId: verificationUser.id });
+  const refreshToken = signRefreshToken({
+    userId: verificationUser.id,
+    tokenVersion: verificationUser.tokenVersion ?? 0,
+  });
 
   const reportSetting = await ReportSettingModel.findOne(
     {
@@ -404,6 +410,9 @@ export const resetPasswordService = async (body: ResetPasswordSchemaType) => {
     password,
     passwordResetOtpHash: null,
     passwordResetOtpExpiresAt: null,
+    // Revoke every previously issued refresh token — a password reset must
+    // sign out any device (or attacker) still holding an old session.
+    tokenVersion: (user.tokenVersion ?? 0) + 1,
   });
 
   await user.save();
@@ -414,7 +423,7 @@ export const resetPasswordService = async (body: ResetPasswordSchemaType) => {
 };
 
 export const refreshTokenService = async (refreshToken: string) => {
-  let payload: { userId: string };
+  let payload: { userId: string; tokenVersion?: number };
   try {
     payload = verifyRefreshToken(refreshToken);
   } catch (error) {
@@ -438,8 +447,21 @@ export const refreshTokenService = async (refreshToken: string) => {
     );
   }
 
+  // Tokens signed before the version bump (e.g. before a password reset) are
+  // revoked. Tokens issued before this field existed carry no claim — treat
+  // them as version 0 so existing sessions keep working.
+  if ((payload.tokenVersion ?? 0) !== (user.tokenVersion ?? 0)) {
+    throw new UnauthorizedException(
+      "Refresh token has been revoked. Please sign in again.",
+      ErrorCodeEnum.AUTH_REFRESH_TOKEN_INVALID,
+    );
+  }
+
   const { token: accessToken, expiresAt } = signJwtToken({ userId: user.id });
-  const nextRefreshToken = signRefreshToken({ userId: user.id });
+  const nextRefreshToken = signRefreshToken({
+    userId: user.id,
+    tokenVersion: user.tokenVersion ?? 0,
+  });
 
   const reportSetting = await ReportSettingModel.findOne(
     { userId: user.id },
