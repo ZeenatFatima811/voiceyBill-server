@@ -30,9 +30,15 @@ const DEFAULT_CATEGORIES = [
 ];
 
 export const getCategoriesService = async (userId: string) => {
-  const existingCount = await CategoryModel.countDocuments({ userId });
+  // PERF: fetch first and seed only when the user has no categories at all,
+  // so the common case is a single indexed query instead of count + find.
+  // This path also runs inside the voice/receipt AI flows, so it's hot.
+  let categories = await CategoryModel.find({ userId }).sort({
+    isDefault: -1,
+    name: 1,
+  });
 
-  if (existingCount === 0) {
+  if (categories.length === 0) {
     await CategoryModel.insertMany(
       DEFAULT_CATEGORIES.map((cat) => ({
         userId,
@@ -41,12 +47,11 @@ export const getCategoriesService = async (userId: string) => {
         isDefault: true,
       }))
     );
+    categories = await CategoryModel.find({ userId }).sort({
+      isDefault: -1,
+      name: 1,
+    });
   }
-
-  const categories = await CategoryModel.find({ userId }).sort({
-    isDefault: -1,
-    name: 1,
-  });
 
   // Self-heal: purge any junk categories that leaked in from older clients
   // (e.g. a category literally named "undefined") so they never show again.
