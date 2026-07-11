@@ -17,6 +17,11 @@ export interface UserDocument extends Document {
   passwordResetOtpHash?: string | null;
   passwordResetOtpExpiresAt?: Date | null;
   lastOtpResentAt?: Date | null;
+  /**
+   * Refresh-token generation counter. Incrementing it invalidates every
+   * refresh token issued before the bump (used on password reset/change).
+   */
+  tokenVersion: number;
   customCategories?: { value: string; label: string }[];
   createdAt: Date;
   updatedAt: Date;
@@ -94,6 +99,10 @@ const userSchema = new Schema<UserDocument>(
       select: false,
       default: null,
     },
+    tokenVersion: {
+      type: Number,
+      default: 0,
+    },
     customCategories: {
       type: [
         {
@@ -125,6 +134,7 @@ userSchema.methods.omitPassword = function (): Omit<UserDocument, "password"> {
   delete userObject.emailVerificationOtpExpiresAt;
   delete userObject.passwordResetOtpHash;
   delete userObject.passwordResetOtpExpiresAt;
+  delete userObject.tokenVersion;
   return userObject;
 };
 

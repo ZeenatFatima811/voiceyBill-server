@@ -73,7 +73,10 @@ export const googleAuthService = async (body: GoogleAuthSchemaType) => {
       if (user) {
         // User already has Google OAuth linked
         const { token, expiresAt } = signJwtToken({ userId: user.id });
-        const refreshToken = signRefreshToken({ userId: user.id });
+        const refreshToken = signRefreshToken({
+          userId: user.id,
+          tokenVersion: user.tokenVersion ?? 0,
+        });
 
         const reportSetting = await ReportSettingModel.findOne(
           { userId: user.id },
@@ -108,7 +111,10 @@ export const googleAuthService = async (body: GoogleAuthSchemaType) => {
         await user.save({ session });
 
         const { token, expiresAt } = signJwtToken({ userId: user.id });
-        const refreshToken = signRefreshToken({ userId: user.id });
+        const refreshToken = signRefreshToken({
+          userId: user.id,
+          tokenVersion: user.tokenVersion ?? 0,
+        });
 
         const reportSetting = await ReportSettingModel.findOne(
           { userId: user.id },
@@ -144,7 +150,10 @@ export const googleAuthService = async (body: GoogleAuthSchemaType) => {
       await createDefaultReportSetting(newUser._id as mongoose.Types.ObjectId, session);
 
       const { token, expiresAt } = signJwtToken({ userId: newUser.id });
-      const refreshToken = signRefreshToken({ userId: newUser.id });
+      const refreshToken = signRefreshToken({
+        userId: newUser.id,
+        tokenVersion: newUser.tokenVersion ?? 0,
+      });
 
       const reportSetting = await ReportSettingModel.findOne(
         { userId: newUser.id },
