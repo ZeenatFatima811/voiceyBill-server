@@ -25,6 +25,11 @@ import currencyRoutes from "./routes/currency.route";
 const app = express();
 const BASE_PATH = Env.BASE_PATH;
 
+// Behind Vercel's proxy, req.ip is the load balancer unless trust proxy is
+// set — which made the per-IP rate limiters share one bucket across unrelated
+// users (legitimate 429 lockouts) while under-counting real clients.
+app.set("trust proxy", 1);
+
 // PERF: response-time instrumentation must wrap every request — register first,
 // before body parsing and routes, so it captures the full request lifetime.
 app.use(performanceLogger);
@@ -57,8 +62,10 @@ const corsOptions = {
   credentials: true,
 };
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// 2mb (default 100kb) so bulk transaction imports of a few hundred rows don't
+// fail with an opaque 413.
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
 app.use(passport.initialize());
 
