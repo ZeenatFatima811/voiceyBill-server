@@ -16,6 +16,29 @@ import { voiceConfig } from "../config/voice.config";
 import { resolveUserCurrencyConversion } from "./currency-conversion.service";
 import UserModel from "../models/user.model";
 import { resolveCurrencyConversion } from "./currency-conversion.service";
+
+/**
+ * Escape every regular-expression metacharacter so a search term is matched
+ * literally.
+ *
+ * Interpolating a raw term into `$regex` lets the caller supply a pattern
+ * rather than a keyword. A crafted term such as `(a+)+$` triggers catastrophic
+ * backtracking in the database's regex engine, tying up a connection until the
+ * query is killed, and characters like `.` silently widen matches.
+ */
+const escapeRegExp = (value: string): string =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Force a query-string value to a primitive string.
+ *
+ * Express parses bracket notation (`?type[$ne]=EXPENSE`) into a nested object.
+ * Assigned straight into a filter, that turns a value the caller controls into a
+ * query operator; coercing first keeps it an inert string.
+ */
+const asQueryString = (value: unknown): string =>
+  typeof value === "string" ? value : String(value);
+
 /**
  * Sanitize and validate pagination inputs to prevent abuse and crashes
  * @param pageSize - requested page size (can be string, number, or invalid)
@@ -239,14 +262,15 @@ export const getAllTransactionService = async (
   };
 
   if (keyword) {
+    const safeKeyword = escapeRegExp(asQueryString(keyword));
     filterConditions.$or = [
-      { title: { $regex: keyword, $options: "i" } },
-      { category: { $regex: keyword, $options: "i" } },
+      { title: { $regex: safeKeyword, $options: "i" } },
+      { category: { $regex: safeKeyword, $options: "i" } },
     ];
   }
 
   if (type) {
-    filterConditions.type = type;
+    filterConditions.type = asQueryString(type);
   }
 
   if (recurringStatus) {
@@ -258,10 +282,10 @@ export const getAllTransactionService = async (
   }
 
   if (startDate || endDate) {
-    const start = startDate ? new Date(startDate) : null;
+    const start = startDate ? new Date(asQueryString(startDate)) : null;
     let end: Date | null = null;
     if (endDate) {
-      end = new Date(endDate);
+      end = new Date(asQueryString(endDate));
       end.setHours(23, 59, 59, 999);
     }
 
