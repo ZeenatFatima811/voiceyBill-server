@@ -1,4 +1,13 @@
 {
+  /* Applies to `npm test`, `npm run dev` and `npm run seed`, which all execute
+     TypeScript through ts-node. `files` makes ts-node honour the `include` below,
+     which is what pulls in the ambient `Express.User` augmentation from
+     src/@types — without it every `req.user._id` fails to compile. `npm run dev`
+     passes --files for the same reason; setting it here means `npm test` needs no
+     shell-specific environment variable. `tsc` ignores this section. */
+  "ts-node": {
+    "files": true
+  },
   "compilerOptions": {
     /* Visit https://aka.ms/tsconfig to read more about this file */
 

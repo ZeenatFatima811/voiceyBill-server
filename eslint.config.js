@@ -113,4 +113,50 @@ export default tseslint.config(
       "no-process-exit": "off",
     },
   },
+
+  {
+    // The e2e suite. Without this block the test files only pick up the
+    // `recommended` presets, where the two rules below are errors rather than
+    // the warnings the src block sets.
+    files: ["test/**/*.ts"],
+
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "module",
+      globals: {
+        ...globals.node,
+        ...globals.es2022,
+      },
+      parserOptions: {
+        project: "./test/tsconfig.json",
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+
+    rules: {
+      // The suite stubs modules by seeding `require.cache`, so several imports
+      // must happen lazily and in a specific order — `src/main.ts` in particular
+      // cannot be loaded until the stubs are in place. Hoisted ES imports would
+      // defeat that, so `require` is deliberate here, not legacy style.
+      "@typescript-eslint/no-require-imports": "off",
+
+      // A decoded JSON response body has no static shape. Typing it precisely
+      // would force a cast at every one of the assertions and make the specs
+      // harder to read than the thing they are checking.
+      "@typescript-eslint/no-explicit-any": "off",
+
+      "@typescript-eslint/no-unused-vars": [
+        "warn",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+        },
+      ],
+      "no-console": "off",
+      eqeqeq: ["error", "always", { null: "ignore" }],
+      "prefer-const": "error",
+      "no-var": "error",
+    },
+  },
 );

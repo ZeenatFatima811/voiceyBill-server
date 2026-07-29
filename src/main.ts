@@ -12,7 +12,6 @@ import passport from "passport";
 
 import { AppModule } from "./app.module";
 import { Env } from "./config/env.config";
-import { errorHandler } from "./middlewares/errorHandler.middleware";
 import { performanceLogger } from "./middlewares/performanceLogger.middleware";
 
 // The set of browser origins allowed to call this API. Kept as a Set so the
@@ -132,14 +131,22 @@ export const createNestApp = async (server: Express = express()) => {
     },
   );
 
-  // Mounts Nest's router and the route-scoped middleware from AppModule.
+  // Mounts Nest's router, the route-scoped middleware from AppModule, the
+  // catch-all not-found handler and — last in the Express chain — Nest's own
+  // error middleware.
+  //
+  // That last one is why no terminal `server.use(errorHandler)` is registered
+  // here. Nest's error middleware sits after every middleware layer registered
+  // above, so a failure raised by pre-router or route-scoped middleware (Multer,
+  // CORS rejection, the per-request database connect) is picked up by it and
+  // routed into `AllExceptionsFilter`, which delegates to the same
+  // `errorHandler`. A handler appended after `init()` would never be reached.
+  //
+  // `test/error-contract.e2e-spec.ts` pins that behaviour: it asserts the legacy
+  // response bodies for both controller-thrown and middleware-raised failures,
+  // so a future Nest upgrade that reorders the exception layer fails a test
+  // rather than silently changing the error contract.
   await app.init();
-
-  // Terminal Express error handler. Nest's global exception filter already
-  // formats everything thrown inside a controller; this catches failures raised
-  // by pre-router and route-scoped middleware (multer, CORS rejection, the
-  // per-request database connect) which never enter Nest's execution context.
-  server.use(errorHandler);
 
   return { app, server };
 };

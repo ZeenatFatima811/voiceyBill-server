@@ -3,9 +3,18 @@ import cors from "cors";
 /**
  * Voice-specific CORS layer, ported verbatim from `routes/voice.route.ts`.
  *
- * Deliberately broader than the global policy: it additionally accepts any
- * `*voiceybill*.vercel.app` preview deployment, which is how the web client's
- * branch previews reach the voice endpoint.
+ * Its origin list is broader than the global policy — it also matches any
+ * `*voiceybill*.vercel.app` preview deployment — but that extra breadth is
+ * UNREACHABLE, and was unreachable before this migration too.
+ *
+ * This is route-scoped middleware, so it runs after the global
+ * `cors(corsOptions)` in `main.ts`'s pre-router stack. An origin the global
+ * policy refuses is already rejected by the time this runs, exactly as in the
+ * old Express app (global `cors` at `index.ts:92`, voice router mounted below
+ * it). Kept as-is to preserve behaviour; `test/middleware.e2e-spec.ts` pins it.
+ *
+ * Genuinely allowing preview origins means changing the global policy, which is
+ * a deliberate behaviour change and belongs in its own PR.
  */
 export const voiceCors = cors({
   origin(

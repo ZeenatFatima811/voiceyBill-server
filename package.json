@@ -8,6 +8,9 @@
   "scripts": {
     "dev": "ts-node-dev --files src/index.ts",
     "build": "tsc",
+    "test": "node --require ts-node/register test/run.ts",
+    "test:watch": "node --require ts-node/register --watch test/run.ts",
+    "typecheck": "tsc --noEmit && tsc --noEmit --project test/tsconfig.json",
     "start": "node dist/index.js",
     "seed": "ts-node-dev --files src/seeds/run-seed.ts",
     "seed:wipe": "ts-node-dev --files src/seeds/run-seed.ts --wipe",
@@ -63,6 +66,7 @@
     "@types/cors": "^2.8.18",
     "@types/dotenv": "^6.1.1",
     "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/mongoose": "^5.11.96",
     "@types/multer": "^1.4.12",
     "@types/node": "^22.15.29",
@@ -72,6 +76,7 @@
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-import": "^2.32.0",
     "eslint-plugin-n": "^17.24.0",
+    "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.60.1"

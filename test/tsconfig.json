@@ -1,0 +1,13 @@
+{
+  /* Type-checks the test suite, which the root tsconfig deliberately excludes so
+     that `npm run build` never emits test files into dist/. Run via
+     `npm run typecheck`. */
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "..",
+    "types": ["node"]
+  },
+  "include": ["**/*.ts", "../src/**/*.ts"],
+  "exclude": []
+}
