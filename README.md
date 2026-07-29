@@ -54,7 +54,7 @@ npm run seed:wipe
 
 ## Tech stack
 
-- **Express 4** + **TypeScript**
+- **NestJS 10** on the **Express 4** platform + **TypeScript**
 - **MongoDB** via **Mongoose 8**
 - **Passport.js** + **JWT** for authentication
 - **Google Generative AI** (Gemini) for voice transcription classification
@@ -136,6 +136,38 @@ If you use Docker, set `MONGO_URI=mongodb://localhost:27017` in `.env` and keep 
 - **Receipt scan** — upload receipt image, AI extraction → transaction fields
 - **Reports** — generate reports, schedule recurring email delivery
 - **User** — profile update, avatar upload
+
+## Project layout
+
+NestJS runs on the Express platform, so the HTTP behaviour (routing, CORS, body
+limits, Multer, Passport) is unchanged from the original Express app.
+
+```
+src/
+  index.ts              entry point — dev listener + Vercel serverless handler
+  main.ts               Nest bootstrap; registers the pre-router middleware stack
+  app.module.ts         root module; binds all route-scoped middleware
+  app.controller.ts     unauthenticated /, /health, /test
+  modules/<feature>/    controller + module + injectable service seam
+  common/               exception filter, JWT strategy, @CurrentUser decorator
+  services/             business logic (framework-agnostic)
+  models/ validators/ dto/ mailers/ utils/ config/ cron/
+```
+
+Routing lives in `@Controller` / `@Get` decorators instead of `src/routes`.
+Business logic in `src/services` is plain functions and is unchanged; each
+feature module exposes a thin `@Injectable()` seam over it so controllers
+resolve dependencies through Nest's DI container.
+
+Two deliberate deviations from default Nest idiom, both to preserve the previous
+behaviour exactly:
+
+- **Authentication is middleware, not a guard.** Express ran Passport across the
+  whole `/<feature>` prefix, before route matching, so an unknown sub-path under
+  a protected prefix answers `401`, not `404`. A guard runs after routing.
+- **Multer is middleware, not `FileInterceptor`.** The interceptor remaps Multer
+  failures to Nest exceptions (e.g. `LIMIT_FILE_SIZE` → 413), which would change
+  the error bodies the shared error handler produces.
 
 ## Multi-currency support
 

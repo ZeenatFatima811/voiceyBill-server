@@ -1,45 +1,23 @@
-import {
-  Strategy as JwtStrategy,
-  ExtractJwt,
-  StrategyOptions,
-} from "passport-jwt";
 import passport from "passport";
-import { Env } from "./env.config";
-import { findByIdUserService } from "../services/user.service";
 
-interface JwtPayload {
-  userId: string;
-}
+// Session serialisation is a no-op pass-through. Every route authenticates with
+// `session: false`, so these are never exercised — kept only so the Passport
+// instance stays configured exactly as it was before the NestJS migration.
+passport.serializeUser((user: Express.User, done) => done(null, user));
+passport.deserializeUser((user: Express.User, done) => done(null, user));
 
-const options: StrategyOptions = {
-  jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
-  secretOrKey: Env.JWT_SECRET,
-  audience: ["user"],
-  algorithms: ["HS256"],
-};
-
-passport.use(
-  new JwtStrategy(options, async (payload: JwtPayload, done) => {
-    try {
-      if (!payload.userId) {
-        return done(null, false, { message: "Invalid token payload" });
-      }
-
-      const user = await findByIdUserService(payload.userId);
-      if (!user) {
-        return done(null, false);
-      }
-
-      return done(null, user);
-    } catch (error) {
-      return done(error, false);
-    }
-  })
-);
-
-passport.serializeUser((user: any, done) => done(null, user));
-passport.deserializeUser((user: any, done) => done(null, user));
-
+/**
+ * Route-scoped authentication middleware.
+ *
+ * The "jwt" strategy itself is registered by the `JwtStrategy` provider (see
+ * `src/common/strategies/jwt.strategy.ts`); Passport resolves it by name at
+ * request time.
+ *
+ * This stays middleware rather than becoming a Nest guard on purpose: Express ran
+ * it across the whole `${BASE_PATH}/<feature>` prefix, ahead of route matching, so
+ * an unknown sub-path under a protected prefix answered 401 rather than 404. A
+ * guard runs after routing and would invert that.
+ */
 export const passportAuthenticateJwt = passport.authenticate("jwt", {
   session: false,
 });
