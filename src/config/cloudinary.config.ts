@@ -1,7 +1,12 @@
 import { v2 as cloudinary } from "cloudinary";
 import { CloudinaryStorage } from "multer-storage-cloudinary";
-import { Env } from "./env.config";
 import multer from "multer";
+
+import { ErrorCodeEnum } from "../enums/error-code.enum";
+import { AppError } from "../utils/app-error";
+
+import { Env } from "./env.config";
+import { HTTPSTATUS } from "./http.config";
 
 cloudinary.config({
   cloud_name: Env.CLOUDINARY_CLOUD_NAME,
@@ -29,7 +34,16 @@ export const upload = multer({
   fileFilter: (_, file, cb) => {
     const isValid = /^image\/(jpe?g|png)$/.test(file.mimetype);
     if (!isValid) {
-      return;
+      // Must signal rejection through the callback. Returning without calling
+      // it leaves Multer waiting on a callback that never arrives, so the
+      // request hangs until the client or platform times out.
+      return cb(
+        new AppError(
+          "Only JPG, JPEG and PNG images are supported",
+          HTTPSTATUS.BAD_REQUEST,
+          ErrorCodeEnum.FILE_UPLOAD_ERROR,
+        ),
+      );
     }
 
     cb(null, true);
