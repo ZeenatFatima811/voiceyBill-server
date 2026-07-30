@@ -30,5 +30,12 @@ jobs:
       - name: TypeScript build
         run: npm run build
 
-      - name: Run tests (if present)
-        run: npm test --if-present
+      # Type-checks the test suite too, which the root tsconfig excludes from the
+      # build so that dist/ never contains test files.
+      - name: Type-check (src + tests)
+        run: npm run typecheck
+
+      # No --if-present: the suite is required. If the script goes missing this
+      # step must fail rather than quietly pass.
+      - name: Run tests
+        run: npm test

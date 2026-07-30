@@ -1,192 +1,68 @@
+// Must stay first: `Env` is evaluated at import time and throws on a missing
+// MONGO_URI, so the .env file has to be loaded before any other module here.
 import "dotenv/config";
-import "./config/passport.config";
-import express, { Request, Response } from "express";
-import cors from "cors";
-import passport from "passport";
-import mongoose from "mongoose";
-import { Env } from "./config/env.config";
-import { HTTPSTATUS } from "./config/http.config";
-import { errorHandler } from "./middlewares/errorHandler.middleware";
-import { asyncHandler } from "./middlewares/asyncHandler.middlerware";
-import { performanceLogger } from "./middlewares/performanceLogger.middleware";
-import { ensureDatabaseConnection } from "./config/database.config";
-import authRoutes from "./routes/auth.route";
-import { passportAuthenticateJwt } from "./config/passport.config";
-import userRoutes from "./routes/user.route";
-import transactionRoutes from "./routes/transaction.route";
-import { initializeCrons } from "./cron";
-import reportRoutes from "./routes/report.route";
-import analyticsRoutes from "./routes/analytics.route";
-import voiceRoutes from "./routes/voice.route";
-import categoryRoutes from "./routes/category.route";
-import budgetRoutes from "./routes/budget.route";
-import currencyRoutes from "./routes/currency.route";
 
-const app = express();
+import express, { type Express, type Request, type Response } from "express";
+
+import { Env } from "./config/env.config";
+import { createNestApp } from "./main";
+
 const BASE_PATH = Env.BASE_PATH;
 
-// Behind Vercel's proxy, req.ip is the load balancer unless trust proxy is
-// set — which made the per-IP rate limiters share one bucket across unrelated
-// users (legitimate 429 lockouts) while under-counting real clients.
-app.set("trust proxy", 1);
+// The Express instance is created up front so the serverless handler below has
+// something to delegate to synchronously, while Nest initialises asynchronously.
+const server: Express = express();
 
-// PERF: response-time instrumentation must wrap every request — register first,
-// before body parsing and routes, so it captures the full request lifetime.
-app.use(performanceLogger);
+let bootstrapPromise: Promise<Express> | null = null;
 
-const allowedOrigins = new Set(
-  [
-    "http://localhost:5173",
-    "https://voiceybill.vercel.app",
-    "https://voiceybill.com",
-    "https://www.voiceybill.com",
-    Env.FRONTEND_ORIGIN,
-  ].filter(Boolean),
-);
+/**
+ * Initialises Nest once per process and reuses it for every later invocation.
+ *
+ * On Vercel this runs during the cold start of a function instance; warm
+ * invocations resolve the already-settled promise and skip straight to the
+ * request.
+ */
+const ready = (): Promise<Express> => {
+  if (!bootstrapPromise) {
+    bootstrapPromise = createNestApp(server)
+      .then(async ({ app }) => {
+        if (Env.NODE_ENV === "development") {
+          const port = parseInt(Env.PORT);
+          await app.listen(port);
+          console.log(`🚀 Server is running on http://localhost:${port}`);
+          console.log(`📋 API Base Path: ${BASE_PATH}`);
+          console.log(`🌍 Environment: ${Env.NODE_ENV}`);
+        }
 
-const corsOptions = {
-  origin: (
-    origin: string | undefined,
-    callback: (err: Error | null, allow?: boolean) => void,
-  ) => {
-    if (!origin) {
-      return callback(null, true);
-    }
+        return server;
+      })
+      .catch((error) => {
+        // Reset so a failed cold start can be retried by the next invocation
+        // instead of caching the rejection forever.
+        bootstrapPromise = null;
+        throw error;
+      });
+  }
 
-    if (allowedOrigins.has(origin)) {
-      return callback(null, true);
-    }
-
-    callback(new Error(`Not allowed by CORS: ${origin}`));
-  },
-  credentials: true,
+  return bootstrapPromise;
 };
 
-// 2mb (default 100kb) so bulk transaction imports of a few hundred rows don't
-// fail with an opaque 413.
-app.use(express.json({ limit: "2mb" }));
-app.use(express.urlencoded({ extended: true, limit: "2mb" }));
-
-app.use(passport.initialize());
-
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-
-  if (origin && allowedOrigins.has(origin)) {
-    res.header("Access-Control-Allow-Origin", origin);
-    res.header("Access-Control-Allow-Credentials", "true");
-    res.header(
-      "Access-Control-Allow-Methods",
-      "GET, POST, PUT, DELETE, OPTIONS, PATCH",
-    );
-    res.header(
-      "Access-Control-Allow-Headers",
-      "Content-Type, Authorization, Accept, Origin, X-Requested-With",
-    );
-    res.header("Vary", "Origin");
-  }
-
-  next();
-});
-
-app.use(cors(corsOptions));
-app.options("*", (req, res) => {
-  const origin = req.headers.origin;
-
-  if (origin && allowedOrigins.has(origin)) {
-    res.header("Access-Control-Allow-Origin", origin);
-    res.header("Access-Control-Allow-Credentials", "true");
-    res.header(
-      "Access-Control-Allow-Methods",
-      "GET, POST, PUT, DELETE, OPTIONS, PATCH",
-    );
-    res.header(
-      "Access-Control-Allow-Headers",
-      "Content-Type, Authorization, Accept, Origin, X-Requested-With",
-    );
-    res.header("Vary", "Origin");
-  }
-
-  res.sendStatus(204);
-});
-
-app.get(
-  "/",
-  asyncHandler(async (_req: Request, res: Response) => {
-    res.status(HTTPSTATUS.OK).json({
-      message: "VoiceyBill API is running successfully!",
-      status: "active",
-      timestamp: new Date().toISOString(),
-      version: "1.0.0",
-    });
-  }),
-);
-
-app.get(
-  "/health",
-  asyncHandler(async (_req: Request, res: Response) => {
-    res.status(HTTPSTATUS.OK).json({
-      status: "healthy",
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-      database:
-        mongoose.connection.readyState === 1 ? "connected" : "disconnected",
-    });
-  }),
-);
-
-app.get(
-  "/test",
-  asyncHandler(async (_req: Request, res: Response) => {
-    res.status(HTTPSTATUS.OK).json({
-      message: "Serverless function is working!",
-      timestamp: new Date().toISOString(),
-      environment: Env.NODE_ENV,
-    });
-  }),
-);
-
-app.use(`${BASE_PATH}/auth`, ensureDatabaseConnection, authRoutes);
-app.use(`${BASE_PATH}/user`, ensureDatabaseConnection, passportAuthenticateJwt, userRoutes);
-app.use(`${BASE_PATH}/transaction`, ensureDatabaseConnection, passportAuthenticateJwt, transactionRoutes);
-app.use(`${BASE_PATH}/report`, ensureDatabaseConnection, passportAuthenticateJwt, reportRoutes);
-app.use(`${BASE_PATH}/analytics`, ensureDatabaseConnection, passportAuthenticateJwt, analyticsRoutes);
-app.use(`${BASE_PATH}/voice`, ensureDatabaseConnection, passportAuthenticateJwt, voiceRoutes);
-app.use(`${BASE_PATH}/category`, ensureDatabaseConnection, passportAuthenticateJwt, categoryRoutes);
-app.use(`${BASE_PATH}/budget`, ensureDatabaseConnection, passportAuthenticateJwt, budgetRoutes);
-app.use(`${BASE_PATH}/currency`, ensureDatabaseConnection, passportAuthenticateJwt, currencyRoutes);
-
-// Catch-all route for 404 errors
-app.use((req: Request, res: Response) => {
-  res.status(404).json({
-    success: false,
-    message: `Route ${req.originalUrl} not found`,
-    status: 404,
-  });
-});
-
-app.use(errorHandler);
-
-// Initialize crons only in development
+// In development this file is the process entry point, so start listening
+// immediately rather than waiting for a first request.
 if (Env.NODE_ENV === "development") {
-  initializeCrons()
-    .then(() => {
-      console.log("Crons initialized");
-    })
-    .catch((error) => {
-      console.error("Cron initialization failed:", error);
-    });
-}
-
-// Start the server in development mode
-if (Env.NODE_ENV === "development") {
-  const port = parseInt(Env.PORT);
-  app.listen(port, () => {
-    console.log(`🚀 Server is running on http://localhost:${port}`);
-    console.log(`📋 API Base Path: ${BASE_PATH}`);
-    console.log(`🌍 Environment: ${Env.NODE_ENV}`);
+  void ready().catch((error) => {
+    console.error("Failed to start the server:", error);
   });
 }
 
-// Export the app for Vercel serverless functions
-export default app;
+/**
+ * Vercel serverless entry point. Kept as the default export from `src/index.ts`
+ * so `vercel.json` needs no change.
+ */
+export default async function handler(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const app = await ready();
+  app(req, res);
+}

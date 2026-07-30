@@ -54,7 +54,7 @@ npm run seed:wipe
 
 ## Tech stack
 
-- **Express 4** + **TypeScript**
+- **NestJS 10** on the **Express 4** platform + **TypeScript**
 - **MongoDB** via **Mongoose 8**
 - **Passport.js** + **JWT** for authentication
 - **Google Generative AI** (Gemini) for voice transcription classification
@@ -115,10 +115,61 @@ npm ci
 ## Development
 
 ```bash
-npm run dev     # ts-node-dev with hot reload
-npm run build   # compile TypeScript → dist/
-npm start       # run compiled build
+npm run dev       # ts-node-dev with hot reload
+npm run build     # compile TypeScript → dist/
+npm start         # run compiled build
+npm test          # run the e2e suite
+npm run typecheck # type-check src + tests without emitting
+npm run lint      # eslint
 ```
+
+## Tests
+
+```bash
+npm test                 # the whole suite
+TEST_VERBOSE=1 npm test  # keep the app's own console output
+```
+
+The suite boots the **real** application through `createNestApp` from
+`src/main.ts`, so what it exercises is the production bootstrap: the pre-router
+middleware order, `AppModule`'s route-scoped middleware, Nest's router and
+not-found handler, the real `JwtStrategy`, the real Zod validators, the real
+Multer instances and the real `errorHandler`.
+
+Only the I/O leaves are replaced — Mongo, the Cloudinary storage engine, the AI
+clients and cron — by seeding `require.cache` in `test/support/app.ts` before
+`src/main.ts` is first imported. **No database or network access is needed**, and
+no test touches real data.
+
+```
+test/
+  run.ts                    entry point; requires every spec
+  support/app.ts            env, stubs, boots the app, request helpers
+  support/fakes.ts          recording test doubles for the service layer
+  support/stub.ts           require.cache seeding helper
+  stub-fidelity.spec.ts     fails if a fake drifts from the real module's exports
+  routing.e2e-spec.ts       route-table parity, resolution order, catch-all 404
+  auth.e2e-spec.ts          401-before-404 ordering, token branches
+  error-contract.e2e-spec.ts  Zod / Multer / AppError / 500 response bodies
+  middleware.e2e-spec.ts    CORS, rate limits, body limits, single-execution
+  contracts.e2e-spec.ts     per-route status, body and argument pass-through
+  serverless.e2e-spec.ts    the Vercel handler and its shared bootstrap
+```
+
+Two properties worth knowing about, because they make the suite trustworthy
+rather than merely green:
+
+- `routing.e2e-spec.ts` derives the live route table from the controller
+  decorators and compares it to a hand-written list **in both directions**. A
+  route that disappears fails, and so does a route that appears without being
+  recorded — so the 46-route surface cannot drift silently.
+- `stub-fidelity.spec.ts` loads each real service module from disk and asserts
+  the corresponding fake exports exactly the same names. Renaming a service
+  function without updating the fake fails the suite instead of leaving a test
+  that passes against a stub production no longer resembles.
+
+There is no test framework dependency: the suite runs on Node's built-in
+`node:test` through `ts-node`, so it adds **zero packages** to the tree.
 
 ## Docker
 
@@ -136,6 +187,68 @@ If you use Docker, set `MONGO_URI=mongodb://localhost:27017` in `.env` and keep 
 - **Receipt scan** — upload receipt image, AI extraction → transaction fields
 - **Reports** — generate reports, schedule recurring email delivery
 - **User** — profile update, avatar upload
+
+## Project layout
+
+NestJS runs on the Express platform, so the HTTP behaviour (routing, CORS, body
+limits, Multer, Passport) is unchanged from the original Express app.
+
+```
+src/
+  index.ts              entry point — dev listener + Vercel serverless handler
+  main.ts               Nest bootstrap; registers the pre-router middleware stack
+  app.module.ts         root module; binds all route-scoped middleware
+  app.controller.ts     unauthenticated /, /health, /test
+  modules/<feature>/    controller + module + injectable service seam
+  common/               exception filter, JWT strategy, @CurrentUser decorator
+  services/             business logic (framework-agnostic)
+  models/ validators/ dto/ mailers/ utils/ config/ cron/
+```
+
+Routing lives in `@Controller` / `@Get` decorators instead of `src/routes`.
+Business logic in `src/services` is plain functions and is unchanged; each
+feature module exposes a thin `@Injectable()` seam over it so controllers
+resolve dependencies through Nest's DI container.
+
+Two deliberate deviations from default Nest idiom, both to preserve the previous
+behaviour exactly:
+
+- **Authentication is middleware, not a guard.** Express ran Passport across the
+  whole `/<feature>` prefix, before route matching, so an unknown sub-path under
+  a protected prefix answers `401`, not `404`. A guard runs after routing.
+- **Multer is middleware, not `FileInterceptor`.** The interceptor remaps Multer
+  failures to Nest exceptions (e.g. `LIMIT_FILE_SIZE` → 413), which would change
+  the error bodies the shared error handler produces.
+
+There is also no terminal `server.use(errorHandler)` in `main.ts`. Nest registers
+its own error middleware last in the Express chain during `app.init()`, so
+failures raised by pre-router and route-scoped middleware (Multer, CORS
+rejection, the per-request database connect) reach `AllExceptionsFilter` — which
+delegates to the same `errorHandler`. A handler appended after `init()` would be
+unreachable. `test/error-contract.e2e-spec.ts` pins this for both
+controller-thrown and middleware-raised failures.
+
+## Dependency notes
+
+`@nestjs/platform-express@10` pins **multer 2.0.2** exactly, and that version
+carries four high-severity DoS advisories. `package.json` therefore has an
+`overrides` entry so the tree resolves to a single patched multer:
+
+```json
+"overrides": { "multer": "^2.1.1" }
+```
+
+Two consequences to be aware of:
+
+- **`npm ls multer` exits non-zero** and prints
+  `invalid: "2.0.2" from node_modules/@nestjs/platform-express`. That is the
+  expected result of overriding an exact pin — install, build and deploy are all
+  unaffected. **Do not gate any script or CI step on `npm ls`.**
+- The override is safe because `platform-express` only uses multer for
+  `FileInterceptor`, which this codebase deliberately does not use (see above),
+  and it stays within the same major version.
+
+Revisit this when moving to NestJS 11, which may pin a patched multer itself.
 
 ## Multi-currency support
 

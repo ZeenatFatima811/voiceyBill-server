@@ -1,4 +1,13 @@
 {
+  /* Applies to `npm test`, `npm run dev` and `npm run seed`, which all execute
+     TypeScript through ts-node. `files` makes ts-node honour the `include` below,
+     which is what pulls in the ambient `Express.User` augmentation from
+     src/@types — without it every `req.user._id` fails to compile. `npm run dev`
+     passes --files for the same reason; setting it here means `npm test` needs no
+     shell-specific environment variable. `tsc` ignores this section. */
+  "ts-node": {
+    "files": true
+  },
   "compilerOptions": {
     /* Visit https://aka.ms/tsconfig to read more about this file */
 
@@ -12,6 +21,8 @@
 
     /* Language and Environment */
     "target": "es2021" /* Set the JavaScript language version for emitted JavaScript and include compatible library declarations. */,
+    "experimentalDecorators": true /* NestJS: enable the legacy decorator proposal used by @Module/@Controller/@Injectable. */,
+    "emitDecoratorMetadata": true /* NestJS: emit design:paramtypes so the DI container can resolve constructor dependencies. */,
     // "lib": [],                                        /* Specify a set of bundled library declaration files that describe the target runtime environment. */
     // "jsx": "preserve",                                /* Specify what JSX code is generated. */
     // "libReplacement": true,                           /* Enable lib replacement. */
