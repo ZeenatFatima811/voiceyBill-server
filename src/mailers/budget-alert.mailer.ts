@@ -1,7 +1,8 @@
 import { Env } from "../config/env.config";
+import { type BudgetAlert } from "../dto/budget.dto";
+
 import { sendEmail } from "./mailer";
 import { getBudgetAlertEmailTemplate } from "./templates/budget-alert.template";
-import { BudgetAlert } from "../dto/budget.dto";
 
 type BudgetAlertEmailParams = {
   email: string;

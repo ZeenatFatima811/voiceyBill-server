@@ -15,7 +15,7 @@ import {
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { Env } from "../../config/env.config";
 import { HTTPSTATUS } from "../../config/http.config";
-import { type TransactionTypeEnum } from "../../models/transaction.model";
+import { type TransactionTypeEnum } from "../../enums/domain.enum";
 import {
   bulkDeleteTransactionSchema,
   bulkTransactionSchema,

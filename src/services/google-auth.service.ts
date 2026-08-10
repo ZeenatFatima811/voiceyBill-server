@@ -1,139 +1,122 @@
-import mongoose from "mongoose";
-import UserModel from "../models/user.model";
-import ReportSettingModel, {
-  ReportFrequencyEnum,
-} from "../models/report-setting.model";
-import { calculateNextReportDate } from "../utils/helper";
-import { signJwtToken, signRefreshToken } from "../utils/jwt";
+/**
+ * Google OAuth sign-in — ported from mongoose to the Postgres repository layer.
+ *
+ * NOTE this service has NO automated coverage: signing in requires a real Google
+ * ID token, which a test cannot mint. It was therefore the one place a
+ * still-on-mongoose service could have survived the migration unnoticed. The
+ * three branches below are the ones to re-read carefully in review.
+ */
 import { verifyGoogleIdToken } from "../config/google-oauth.config";
 import {
-  BadRequestException,
-  UnauthorizedException,
-} from "../utils/app-error";
-import { GoogleAuthSchemaType } from "../validators/google-auth.validator";
+  reports as reportRepo,
+  users as userRepo,
+  withTransaction,
+  type Executor,
+} from "../db/repositories";
+import { ReportFrequencyEnum } from "../enums/domain.enum";
+import { BadRequestException } from "../utils/app-error";
+import { calculateNextReportDate } from "../utils/helper";
+import { signJwtToken, signRefreshToken } from "../utils/jwt";
+import type { GoogleAuthSchemaType } from "../validators/google-auth.validator";
 
-const createDefaultReportSetting = async (
-  userId: mongoose.Types.ObjectId,
-  session?: mongoose.ClientSession,
-) => {
-  const reportQuery = ReportSettingModel.findOne({ userId });
-  if (session) {
-    reportQuery.session(session);
-  }
+const createDefaultReportSetting = async (userId: string, exec?: Executor) => {
+  const existing = await reportRepo.findSettingByUser(userId, exec);
+  if (existing) return existing;
 
-  const existingReportSetting = await reportQuery;
-
-  if (existingReportSetting) {
-    return existingReportSetting;
-  }
-
-  const reportSetting = new ReportSettingModel({
-    userId,
-    frequency: ReportFrequencyEnum.MONTHLY,
-    isEnabled: true,
-    nextReportDate: calculateNextReportDate(),
-    lastSentDate: null,
-  });
-
-  if (session) {
-    await reportSetting.save({ session });
-  } else {
-    await reportSetting.save();
-  }
-
-  return reportSetting;
+  return reportRepo.createSetting(
+    {
+      userId,
+      frequency: ReportFrequencyEnum.MONTHLY,
+      isEnabled: true,
+      nextReportDate: calculateNextReportDate(),
+      lastSentDate: null,
+    },
+    exec,
+  );
 };
 
 export const googleAuthService = async (body: GoogleAuthSchemaType) => {
-  const session = await mongoose.startSession();
-
+  /**
+   * Token verification happens BEFORE the transaction opens.
+   *
+   * It is a network round trip to Google and it touches no table, so holding a
+   * transaction open across it buys nothing and costs real capacity: `db/client.ts`
+   * caps the pool at ONE connection per serverless instance, so an in-transaction
+   * verify blocks that instance's only connection on an external service for the
+   * duration. The mongoose version did it inside the session, where a session was
+   * cheap; the Postgres equivalent is not.
+   *
+   * No behaviour changes — both failure branches below throw before any write, so
+   * there was never anything to roll back.
+   */
+  let googlePayload;
   try {
-    return await session.withTransaction(async () => {
-      // Verify Google ID token
-      let googlePayload;
-      try {
-        googlePayload = await verifyGoogleIdToken(body.idToken);
-      } catch (error) {
-        throw new BadRequestException(
-          "Invalid or expired Google token. Please try again.",
-        );
-      }
+    googlePayload = await verifyGoogleIdToken(body.idToken);
+  } catch (error) {
+    throw new BadRequestException(
+      "Invalid or expired Google token. Please try again.",
+    );
+  }
 
-      if (!googlePayload.email) {
-        throw new BadRequestException(
-          "Could not retrieve email from Google account.",
-        );
-      }
+  if (!googlePayload.email) {
+    throw new BadRequestException(
+      "Could not retrieve email from Google account.",
+    );
+  }
 
-      // Check if user exists by Google ID first
-      let user = await UserModel.findOne({
-        providerId: googlePayload.googleId,
-      }).session(session);
+  return withTransaction(async (tx) => {
+    /** The token trio every branch returns, so the three stay identical. */
+    const issue = async (userId: string, tokenVersion: number) => {
+      const { token, expiresAt } = signJwtToken({ userId });
+      const refreshToken = signRefreshToken({ userId, tokenVersion });
+      const reportSetting = await reportRepo.findSettingSummaryByUser(userId, tx);
+      const user = await userRepo.findById(userId, tx);
 
-      if (user) {
-        // User already has Google OAuth linked
-        const { token, expiresAt } = signJwtToken({ userId: user.id });
-        const refreshToken = signRefreshToken({
-          userId: user.id,
-          tokenVersion: user.tokenVersion ?? 0,
-        });
+      return { user, accessToken: token, refreshToken, expiresAt, reportSetting };
+    };
 
-        const reportSetting = await ReportSettingModel.findOne(
-          { userId: user.id },
-          { _id: 1, frequency: 1, isEnabled: 1 },
-        )
-          .session(session)
-          .lean();
+    /**
+     * Check if user exists by Google ID first.
+     *
+     * The Mongo query matched on `providerId` alone. Adding `provider` narrows
+     * it in principle, but only Google accounts ever carry a providerId — every
+     * local row has null, which is why the index on that column is partial — so
+     * the result set is identical, and the extra predicate makes the intent
+     * explicit rather than implied.
+     */
+    const byProvider = await userRepo.findByProviderId(
+      "google",
+      googlePayload.googleId,
+      tx,
+    );
 
-        return {
-          user: user.omitPassword(),
-          accessToken: token,
-          refreshToken,
-          expiresAt,
-          reportSetting,
-        };
-      }
+    if (byProvider) {
+      // User already has Google OAuth linked
+      return issue(byProvider._id, byProvider.tokenVersion ?? 0);
+    }
 
-      // Check if user exists by email
-      user = await UserModel.findOne({ email: googlePayload.email }).session(
-        session,
-      );
+    // Check if user exists by email
+    const byEmail = await userRepo.findByEmailWithSecrets(googlePayload.email, tx);
 
-      if (user) {
-        // User exists but with email/password auth - link Google account
-        user.set({
+    if (byEmail) {
+      // User exists but with email/password auth - link Google account
+      await userRepo.update(
+        byEmail._id,
+        {
           provider: "google",
           providerId: googlePayload.googleId,
-          profilePicture: googlePayload.picture || user.profilePicture,
+          profilePicture: googlePayload.picture || byEmail.profilePicture,
           isVerified: true, // Auto-verify since Google verifies email
-        });
+        },
+        tx,
+      );
 
-        await user.save({ session });
+      return issue(byEmail._id, byEmail.tokenVersion ?? 0);
+    }
 
-        const { token, expiresAt } = signJwtToken({ userId: user.id });
-        const refreshToken = signRefreshToken({
-          userId: user.id,
-          tokenVersion: user.tokenVersion ?? 0,
-        });
-
-        const reportSetting = await ReportSettingModel.findOne(
-          { userId: user.id },
-          { _id: 1, frequency: 1, isEnabled: 1 },
-        )
-          .session(session)
-          .lean();
-
-        return {
-          user: user.omitPassword(),
-          accessToken: token,
-          refreshToken,
-          expiresAt,
-          reportSetting,
-        };
-      }
-
-      // Create new user
-      const newUser = new UserModel({
+    // Create new user
+    const created = await userRepo.create(
+      {
         name: googlePayload.name,
         email: googlePayload.email,
         profilePicture: googlePayload.picture,
@@ -142,35 +125,13 @@ export const googleAuthService = async (body: GoogleAuthSchemaType) => {
         password: null,
         isVerified: googlePayload.emailVerified, // Google verifies email
         baseCurrency: "USD",
-      });
+      },
+      tx,
+    );
 
-      await newUser.save({ session });
+    // Create default report setting
+    await createDefaultReportSetting(created._id, tx);
 
-      // Create default report setting
-      await createDefaultReportSetting(newUser._id as mongoose.Types.ObjectId, session);
-
-      const { token, expiresAt } = signJwtToken({ userId: newUser.id });
-      const refreshToken = signRefreshToken({
-        userId: newUser.id,
-        tokenVersion: newUser.tokenVersion ?? 0,
-      });
-
-      const reportSetting = await ReportSettingModel.findOne(
-        { userId: newUser.id },
-        { _id: 1, frequency: 1, isEnabled: 1 },
-      )
-        .session(session)
-        .lean();
-
-      return {
-        user: newUser.omitPassword(),
-        accessToken: token,
-        refreshToken,
-        expiresAt,
-        reportSetting,
-      };
-    });
-  } finally {
-    await session.endSession();
-  }
+    return issue(created._id, created.tokenVersion ?? 0);
+  });
 };

@@ -1,9 +1,25 @@
-import CategoryModel from "../models/category.model";
-import TransactionModel from "../models/transaction.model";
+/**
+ * Category service — ported from mongoose to the Postgres repository layer.
+ *
+ * The signatures and the returned shapes are unchanged; only the data access
+ * moved.
+ *
+ * Three regex translations were needed:
+ *
+ *   Mongo                                          Postgres
+ *   ------------------------------------------     --------------------------
+ *   { $regex: new RegExp('^'+name+'$', 'i') }       lower(name) = lower($1)
+ *   .sort({ isDefault: -1, name: 1 })               order by is_default desc, name
+ *   updateMany({ category: /^name$/i })             lower(category) = lower($1)
+ *
+ * The anchors matter: an unanchored ILIKE would also rewrite "Fast Food" when
+ * renaming "Food". See the note on `transactions.renameCategory`.
+ */
+import { categories, transactions } from "../db/repositories";
 import { ConflictException, NotFoundException } from "../utils/app-error";
 import {
-  CreateCategoryType,
-  UpdateCategoryType,
+  type CreateCategoryType,
+  type UpdateCategoryType,
 } from "../validators/category.validator";
 
 // Junk values that should never be treated as a real category.
@@ -33,37 +49,40 @@ export const getCategoriesService = async (userId: string) => {
   // PERF: fetch first and seed only when the user has no categories at all,
   // so the common case is a single indexed query instead of count + find.
   // This path also runs inside the voice/receipt AI flows, so it's hot.
-  let categories = await CategoryModel.find({ userId }).sort({
-    isDefault: -1,
-    name: 1,
-  });
+  let userCategories = await categories.listByUser(userId);
 
-  if (categories.length === 0) {
-    await CategoryModel.insertMany(
+  if (userCategories.length === 0) {
+    /**
+     * `onConflictDoNothing` on (user_id, name) rather than a plain insert.
+     *
+     * Two concurrent first-time requests — which the voice and receipt flows
+     * make likely, since both call this — would otherwise race between the
+     * emptiness check and the insert, and the loser would get a unique-index
+     * error instead of a category list. Mongo's `insertMany` had the same race
+     * and the same failure; this closes it.
+     */
+    await categories.createManyIgnoringConflicts(
       DEFAULT_CATEGORIES.map((cat) => ({
         userId,
         name: cat.name,
         color: cat.color,
         isDefault: true,
-      }))
+      })),
     );
-    categories = await CategoryModel.find({ userId }).sort({
-      isDefault: -1,
-      name: 1,
-    });
+    userCategories = await categories.listByUser(userId);
   }
 
   // Self-heal: purge any junk categories that leaked in from older clients
   // (e.g. a category literally named "undefined") so they never show again.
-  const junkIds = categories
+  const junkIds = userCategories
     .filter((cat) => !isValidCategoryName(cat.name))
     .map((cat) => cat._id);
 
   if (junkIds.length) {
-    await CategoryModel.deleteMany({ _id: { $in: junkIds } });
+    await categories.removeByIds(junkIds);
   }
 
-  return categories.filter((cat) => isValidCategoryName(cat.name));
+  return userCategories.filter((cat) => isValidCategoryName(cat.name));
 };
 
 /**
@@ -71,70 +90,54 @@ export const getCategoriesService = async (userId: string) => {
  * user has none yet. Used to feed the voice/receipt AI classifier so it maps
  * transactions to the user's real categories instead of a hardcoded list.
  */
-export const getUserCategoryNames = async (
-  userId: string
-): Promise<string[]> => {
-  const categories = await getCategoriesService(userId);
-  return categories.map((cat) => cat.name);
+export const getUserCategoryNames = async (userId: string): Promise<string[]> => {
+  const userCategories = await getCategoriesService(userId);
+  return userCategories.map((cat) => cat.name);
 };
 
 export const createCategoryService = async (
   userId: string,
-  body: CreateCategoryType
+  body: CreateCategoryType,
 ) => {
-  const existing = await CategoryModel.findOne({
-    userId,
-    name: { $regex: new RegExp(`^${body.name}$`, "i") },
-  });
+  const existing = await categories.findByName(userId, body.name);
 
   if (existing) {
-    throw new ConflictException(
-      `Category "${body.name}" already exists`
-    );
+    throw new ConflictException(`Category "${body.name}" already exists`);
   }
 
-  return CategoryModel.create({ userId, ...body, isDefault: false });
+  return categories.create({ userId, ...body, isDefault: false });
 };
 
 export const updateCategoryService = async (
   userId: string,
   categoryId: string,
-  body: UpdateCategoryType
+  body: UpdateCategoryType,
 ) => {
-  const category = await CategoryModel.findOne({ _id: categoryId, userId });
+  const category = await categories.findById(categoryId, userId);
   if (!category) throw new NotFoundException("Category not found");
 
   if (body.name && body.name !== category.name) {
-    const duplicate = await CategoryModel.findOne({
-      userId,
-      _id: { $ne: categoryId },
-      name: { $regex: new RegExp(`^${body.name}$`, "i") },
-    });
-    if (duplicate) throw new ConflictException(`Category "${body.name}" already exists`);
+    const duplicate = await categories.findByName(userId, body.name, categoryId);
+    if (duplicate) {
+      throw new ConflictException(`Category "${body.name}" already exists`);
+    }
 
-    await TransactionModel.updateMany(
-      { userId, category: { $regex: new RegExp(`^${category.name}$`, "i") } },
-      { $set: { category: body.name } }
-    );
+    await transactions.renameCategory(userId, category.name, body.name);
   }
 
-  Object.assign(category, body);
-  await category.save();
-  return category;
+  const updated = await categories.update(categoryId, userId, body);
+  // The row was read a moment ago, so a null here means it was deleted
+  // concurrently; the original surfaced the same situation as a missing category.
+  if (!updated) throw new NotFoundException("Category not found");
+  return updated;
 };
 
-export const deleteCategoryService = async (
-  userId: string,
-  categoryId: string
-) => {
-  const category = await CategoryModel.findOne({ _id: categoryId, userId });
+export const deleteCategoryService = async (userId: string, categoryId: string) => {
+  const category = await categories.findById(categoryId, userId);
   if (!category) throw new NotFoundException("Category not found");
 
-  await TransactionModel.updateMany(
-    { userId, category: { $regex: new RegExp(`^${category.name}$`, "i") } },
-    { $set: { category: "Uncategorized" } }
-  );
+  await transactions.renameCategory(userId, category.name, "Uncategorized");
+  await categories.remove(categoryId, userId);
 
-  await category.deleteOne();
   return { message: "Category deleted successfully" };
 };

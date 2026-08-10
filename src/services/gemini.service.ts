@@ -1,5 +1,6 @@
 import OpenAI from "openai";
-import { TransactionData } from "../@types/voice.type";
+
+import { type TransactionData } from "../@types/voice.type";
 import { voiceConfig } from "../config/voice.config";
 import { AppError } from "../utils/app-error";
 

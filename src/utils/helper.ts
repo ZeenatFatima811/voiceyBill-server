@@ -1,5 +1,6 @@
 import { addDays, addMonths, addWeeks, addYears, startOfMonth } from "date-fns";
-import { RecurringIntervalEnum } from "../models/transaction.model";
+
+import { RecurringIntervalEnum } from "../enums/domain.enum";
 
 export function calculateNextReportDate(lastSentDate?: Date): Date {
   const now = new Date();

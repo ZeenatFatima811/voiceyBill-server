@@ -1,5 +1,5 @@
-import { PaymentMethodEnum } from "../models/transaction.model";
 import { voiceConfig } from "../config/voice.config";
+import { PaymentMethodEnum } from "../enums/domain.enum";
 
 // Builds the receipt-scan prompt for a specific user. `categories` are the
 // user's real categories (default + custom); when empty we fall back to the

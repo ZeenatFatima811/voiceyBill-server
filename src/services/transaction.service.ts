@@ -1,33 +1,38 @@
-import mongoose from "mongoose";
-import TransactionModel, {
-  TransactionTypeEnum,
-} from "../models/transaction.model";
-import { BadRequestException, NotFoundException } from "../utils/app-error";
-import BudgetModel from "../models/budget.model";
-import { ErrorCodeEnum } from "../enums/error-code.enum";
-import { calculateNextOccurrence } from "../utils/helper";
+import { openai, openAIModel } from "../config/openai.config";
+import { voiceConfig } from "../config/voice.config";
 import {
+  budgets as budgetRepo,
+  transactions as transactionRepo,
+  users as userRepo,
+  withTransaction,
+  type Executor,
+} from "../db/repositories";
+import { TransactionTypeEnum } from "../enums/domain.enum";
+import { ErrorCodeEnum } from "../enums/error-code.enum";
+import { BadRequestException, NotFoundException } from "../utils/app-error";
+import { calculateNextOccurrence } from "../utils/helper";
+import { receiptPrompt } from "../utils/prompt";
+import type {
   CreateTransactionType,
   UpdateTransactionType,
 } from "../validators/transaction.validator";
-import { openai, openAIModel } from "../config/openai.config";
-import { receiptPrompt } from "../utils/prompt";
-import { voiceConfig } from "../config/voice.config";
-import { resolveUserCurrencyConversion } from "./currency-conversion.service";
-import UserModel from "../models/user.model";
-import { resolveCurrencyConversion } from "./currency-conversion.service";
+
+import {
+  resolveCurrencyConversion,
+  resolveUserCurrencyConversion,
+} from "./currency-conversion.service";
 
 /**
- * Escape every regular-expression metacharacter so a search term is matched
- * literally.
+ * The regex-escaping helper this file used to carry is gone along with `$regex`.
  *
- * Interpolating a raw term into `$regex` lets the caller supply a pattern
- * rather than a keyword. A crafted term such as `(a+)+$` triggers catastrophic
- * backtracking in the database's regex engine, tying up a connection until the
- * query is killed, and characters like `.` silently widen matches.
+ * Its job — stopping a caller from supplying a PATTERN rather than a keyword,
+ * including one like `(a+)+$` that triggers catastrophic backtracking and ties
+ * up a connection until the query is killed — now belongs to the repository's
+ * `escapeLikePattern`, which escapes the only three characters ILIKE treats
+ * specially. See src/db/repositories/transaction.repository.ts.
+ *
+ * a keyword of `.*` must match literally, i.e. return nothing.
  */
-const escapeRegExp = (value: string): string =>
-  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * Force a query-string value to a primitive string.
@@ -136,7 +141,7 @@ export const createTransactionService = async (
   };
 
   if (body.type !== TransactionTypeEnum.EXPENSE) {
-    return TransactionModel.create(transactionDoc);
+    return transactionRepo.create(transactionDoc as never);
   }
 
   // Expense: validate against the budget and insert atomically. Without a
@@ -144,27 +149,18 @@ export const createTransactionService = async (
   // total, both pass validation, and jointly exceed the budget (check-then-act
   // race). Snapshot reads + the insert now commit together; a validation
   // failure aborts the transaction. Requires a replica set (all Atlas tiers).
-  const session = await mongoose.startSession();
-  try {
-    let created: Awaited<ReturnType<typeof TransactionModel.create>>[number] | undefined;
+  return withTransaction(async (tx) => {
+    await validateExpenseAgainstBudget(
+      userId,
+      new Date(body.date),
+      currencyFields.amount,
+      body.category,
+      tx,
+      undefined,
+    );
 
-    await session.withTransaction(async () => {
-      await validateExpenseAgainstBudget(
-        userId,
-        new Date(body.date),
-        currencyFields.amount,
-        body.category,
-        session,
-      );
-
-      const [doc] = await TransactionModel.create([transactionDoc], { session });
-      created = doc;
-    });
-
-    return created!;
-  } finally {
-    await session.endSession();
-  }
+    return transactionRepo.create(transactionDoc as never, tx);
+  });
 };
 
 /**
@@ -178,34 +174,32 @@ const validateExpenseAgainstBudget = async (
   transactionDate: Date,
   amount: number,
   category: string | undefined,
-  session: mongoose.ClientSession,
+  exec: Executor,
   excludeTransactionId?: string,
 ) => {
   const month = transactionDate.getMonth() + 1;
   const year = transactionDate.getFullYear();
 
-  const budget = await BudgetModel.findOne({
-    userId,
-    month,
-    year,
-  }).session(session);
+  const budget = await budgetRepo.findByMonth(userId, month, year, exec);
 
   if (!budget) return;
 
   // Calculate current total spent for this month/year
   const startDate = new Date(year, month - 1, 1);
   const endDate = new Date(year, month, 0, 23, 59, 59, 999);
-  const transactions = await TransactionModel.find({
-    userId,
-    ...(excludeTransactionId && { _id: { $ne: excludeTransactionId } }),
-    type: TransactionTypeEnum.EXPENSE,
-    date: {
-      $gte: startDate,
-      $lte: endDate,
+  // Reads run on the CALLER's transaction. The check-then-act race this guards
+  // is only closed if the validation and the write see the same snapshot.
+  const transactions = await transactionRepo.list(
+    {
+      userId,
+      excludeId: excludeTransactionId,
+      type: TransactionTypeEnum.EXPENSE,
+      startDate,
+      endDate,
     },
-  })
-    .select("amount category") // PERF: only the fields the budget sum needs
-    .session(session);
+    {},
+    exec,
+  );
 
   const totalSpent = transactions.reduce((sum, t) => sum + (typeof t.amount === 'number' ? t.amount : parseFloat(String(t.amount || 0))), 0);
 
@@ -257,67 +251,33 @@ export const getAllTransactionService = async (
 ) => {
   const { keyword, type, recurringStatus, startDate, endDate } = filters;
 
-  const filterConditions: Record<string, any> = {
+  let start: Date | undefined;
+  let end: Date | undefined;
+
+  if (startDate) start = new Date(asQueryString(startDate));
+  if (endDate) {
+    end = new Date(asQueryString(endDate));
+    // End of the given day in the SERVER's local zone. Preserved verbatim from
+    // the Mongo implementation rather than switched to UTC, which would move
+    // the boundary for every existing deployment.
+    end.setHours(23, 59, 59, 999);
+  }
+
+  const filterConditions = {
     userId,
+    // Coerced to a primitive string first: Express parses bracket notation
+    // (`?type[$ne]=EXPENSE`) into an object, which under Mongo turned a
+    // caller-supplied value into a query operator.
+    ...(keyword && { keyword: asQueryString(keyword) }),
+    ...(type && { type: asQueryString(type) }),
+    ...(recurringStatus && { recurringStatus }),
+    ...(start && { startDate: start }),
+    ...(end && { endDate: end }),
+    // The list endpoint matches a row whose `date` OR whose `createdAt` falls
+    // in the window - see the note on `dateField` in the repository.
+    dateField: "dateOrCreatedAt" as const,
   };
 
-  if (keyword) {
-    const safeKeyword = escapeRegExp(asQueryString(keyword));
-    filterConditions.$or = [
-      { title: { $regex: safeKeyword, $options: "i" } },
-      { category: { $regex: safeKeyword, $options: "i" } },
-    ];
-  }
-
-  if (type) {
-    filterConditions.type = asQueryString(type);
-  }
-
-  if (recurringStatus) {
-    if (recurringStatus === "RECURRING") {
-      filterConditions.isRecurring = true;
-    } else if (recurringStatus === "NON_RECURRING") {
-      filterConditions.isRecurring = false;
-    }
-  }
-
-  if (startDate || endDate) {
-    const start = startDate ? new Date(asQueryString(startDate)) : null;
-    let end: Date | null = null;
-    if (endDate) {
-      end = new Date(asQueryString(endDate));
-      end.setHours(23, 59, 59, 999);
-    }
-
-    const dateConditions: Record<string, any>[] = [];
-    const createdAtConditions: Record<string, any>[] = [];
-
-    if (start) {
-      dateConditions.push({ date: { $gte: start } });
-      createdAtConditions.push({ createdAt: { $gte: start } });
-    }
-    if (end) {
-      dateConditions.push({ date: { $lte: end } });
-      createdAtConditions.push({ createdAt: { $lte: end } });
-    }
-
-    const rangeCondition = {
-      $or: [
-        { $and: dateConditions },
-        { $and: createdAtConditions }
-      ]
-    };
-
-    if (filterConditions.$or) {
-      filterConditions.$and = [
-        { $or: filterConditions.$or },
-        rangeCondition
-      ];
-      delete filterConditions.$or;
-    } else {
-      filterConditions.$or = rangeCondition.$or;
-    }
-  }
 
   // Sanitize pagination inputs to prevent abuse and invalid queries
   const { pageSize, pageNumber } = sanitizeAndValidatePagination(
@@ -329,11 +289,8 @@ export const getAllTransactionService = async (
   const skip = (pageNumber - 1) * pageSize;
 
   const [transactions, totalCount] = await Promise.all([
-    TransactionModel.find(filterConditions)
-      .skip(skip)
-      .limit(pageSize)
-      .sort({ createdAt: -1 }),
-    TransactionModel.countDocuments(filterConditions),
+    transactionRepo.list(filterConditions, { skip, limit: pageSize }),
+    transactionRepo.countAll(filterConditions),
   ]);
 
   const totalPages = Math.ceil(totalCount / pageSize);
@@ -354,10 +311,7 @@ export const getTransactionByIdService = async (
   userId: string,
   transactionId: string,
 ) => {
-  const transaction = await TransactionModel.findOne({
-    _id: transactionId,
-    userId,
-  });
+  const transaction = await transactionRepo.findById(transactionId, userId);
 
   if (!transaction) {
     throw new NotFoundException("Transaction not found");
@@ -370,30 +324,38 @@ export const duplicateTransactionService = async (
   userId: string,
   transactionId: string,
 ) => {
-  const transaction = await TransactionModel.findOne({
-    _id: transactionId,
-    userId,
-  });
+  const transaction = await transactionRepo.findById(transactionId, userId);
 
   if (!transaction) {
     throw new NotFoundException("Transaction not found");
   }
 
-  const duplicated = await TransactionModel.create({
-    ...transaction.toObject(),
-    _id: undefined,
+  /**
+   * Identity and timestamps are stripped so the copy gets its own.
+   *
+   * Mongoose set them to `undefined` on a spread of `toObject()`; destructuring
+   * them away is the same intent without relying on undefined being dropped.
+   * Amounts round-trip in DOLLARS - `findById` converted out of cents and
+   * `create` converts back.
+   */
+  const {
+    _id: _ignoredId,
+    id: _ignoredVirtualId,
+    createdAt: _ignoredCreatedAt,
+    updatedAt: _ignoredUpdatedAt,
+    ...copyable
+  } = transaction;
+
+  return transactionRepo.create({
+    ...copyable,
     title: `Duplicate - ${transaction.title}`,
     description: transaction.description
       ? `${transaction.description} (Duplicate)`
       : "Duplicated transaction",
     isRecurring: false,
-    recurringInterval: undefined,
-    nextRecurringDate: undefined,
-    createdAt: undefined,
-    updatedAt: undefined,
+    recurringInterval: null,
+    nextRecurringDate: null,
   });
-
-  return duplicated;
 };
 
 export const updateTransactionService = async (
@@ -401,10 +363,7 @@ export const updateTransactionService = async (
   transactionId: string,
   body: UpdateTransactionType,
 ) => {
-  const existingTransaction = await TransactionModel.findOne({
-    _id: transactionId,
-    userId,
-  });
+  const existingTransaction = await transactionRepo.findById(transactionId, userId);
 
   if (!existingTransaction) {
     throw new NotFoundException("Transaction not found");
@@ -416,6 +375,13 @@ export const updateTransactionService = async (
   const date =
     body.date !== undefined ? new Date(body.date) : existingTransaction.date;
 
+  /**
+   * The stored value is typed `string | null`, because the Drizzle column takes
+   * its allowed values from `RecurringIntervalEnum` at runtime and widens to
+   * `string` at the type level. The CHECK constraint in
+   * drizzle/0001_constraints_and_triggers.sql is what actually guarantees the
+   * value is one of the four, so narrowing here is safe.
+   */
   let recurringInterval:
     | "DAILY"
     | "WEEKLY"
@@ -423,7 +389,13 @@ export const updateTransactionService = async (
     | "YEARLY"
     | null
     | undefined =
-    body.recurringInterval ?? existingTransaction.recurringInterval;
+    body.recurringInterval ??
+    (existingTransaction.recurringInterval as
+      | "DAILY"
+      | "WEEKLY"
+      | "MONTHLY"
+      | "YEARLY"
+      | null);
 
   let nextRecurringDate: Date | undefined | null = null;
 
@@ -469,21 +441,21 @@ export const updateTransactionService = async (
 
   const targetType = body.type || existingTransaction.type;
 
-  const applyUpdate = async (session?: mongoose.ClientSession) => {
-    existingTransaction.set({
-      ...(body.title && { title: body.title }),
-      ...(body.description && { description: body.description }),
-      ...(body.category && { category: body.category }),
-      ...(body.type && { type: body.type }),
-      ...(body.paymentMethod && { paymentMethod: body.paymentMethod }),
-      ...currencyUpdate,
-      date,
-      isRecurring,
-      recurringInterval,
-      nextRecurringDate,
-    });
-    await existingTransaction.save({ session });
+  const patch = {
+    ...(body.title && { title: body.title }),
+    ...(body.description && { description: body.description }),
+    ...(body.category && { category: body.category }),
+    ...(body.type && { type: body.type }),
+    ...(body.paymentMethod && { paymentMethod: body.paymentMethod }),
+    ...currencyUpdate,
+    date,
+    isRecurring,
+    recurringInterval,
+    nextRecurringDate,
   };
+
+  const applyUpdate = (exec?: Executor) =>
+    transactionRepo.update(transactionId, patch, userId, exec);
 
   if (targetType !== TransactionTypeEnum.EXPENSE) {
     await applyUpdate();
@@ -496,22 +468,17 @@ export const updateTransactionService = async (
       ? currencyUpdate.amount
       : existingTransaction.amount;
 
-  const session = await mongoose.startSession();
-  try {
-    await session.withTransaction(async () => {
-      await validateExpenseAgainstBudget(
-        userId,
-        new Date(date),
-        targetAmount,
-        body.category || existingTransaction.category,
-        session,
-        transactionId,
-      );
-      await applyUpdate(session);
-    });
-  } finally {
-    await session.endSession();
-  }
+  await withTransaction(async (tx) => {
+    await validateExpenseAgainstBudget(
+      userId,
+      new Date(date),
+      targetAmount,
+      body.category || existingTransaction.category,
+      tx,
+      transactionId,
+    );
+    await applyUpdate(tx);
+  });
 
   return;
 };
@@ -520,10 +487,7 @@ export const deleteTransactionService = async (
   userId: string,
   transactionId: string,
 ) => {
-  const deleted = await TransactionModel.findOneAndDelete({
-    _id: transactionId,
-    userId,
-  });
+  const deleted = await transactionRepo.remove(transactionId, userId);
 
   if (!deleted) {
     throw new NotFoundException("Transaction not found");
@@ -536,18 +500,19 @@ export const bulkDeleteTransactionService = async (
   userId: string,
   transactionIds: string[],
 ) => {
-  const result = await TransactionModel.deleteMany({
-    _id: { $in: transactionIds },
+  const deletedCount = await transactionRepo.removeMany({
+    ids: transactionIds,
     userId,
   });
 
-  if (result.deletedCount === 0) {
+  if (deletedCount === 0) {
     throw new NotFoundException("No transations found");
   }
 
   return {
+    // NOTE the typo: the clients read `sucess`, so it is preserved verbatim.
     sucess: true,
-    deletedCount: result.deletedCount,
+    deletedCount,
   };
 };
 
@@ -556,10 +521,10 @@ export const bulkTransactionService = async (
   transactions: CreateTransactionType[],
 ) => {
   try {
-    const user = await UserModel.findById(userId).select("baseCurrency").lean();
+    const user = await userRepo.findById(userId);
     const baseCurrency = user?.baseCurrency || "USD";
 
-    const bulkOps = await Promise.all(
+    const rows = await Promise.all(
       transactions.map(async (tx) => {
         const currencyFields = await resolveCurrencyConversion(
           baseCurrency,
@@ -568,36 +533,37 @@ export const bulkTransactionService = async (
         );
 
         return {
-          insertOne: {
-            document: {
-              ...tx,
-              userId,
-              date: new Date(tx.date),
-              amount: currencyFields.amount,
-              originalAmount: currencyFields.originalAmount,
-              originalCurrency: currencyFields.originalCurrency,
-              baseCurrencyAtTime: currencyFields.baseCurrencyAtTime,
-              exchangeRate: currencyFields.exchangeRate,
-              rateSource: currencyFields.rateSource,
-              exchangeRateFetchedAt: currencyFields.exchangeRateFetchedAt,
-              isRecurring: false,
-              nextRecurringDate: null,
-              recurringInterval: null,
-              lastProcesses: null,
-              createdAt: new Date(),
-              updatedAt: new Date(),
-            },
-          },
+          ...tx,
+          userId,
+          date: new Date(tx.date),
+          amount: currencyFields.amount,
+          originalAmount: currencyFields.originalAmount,
+          originalCurrency: currencyFields.originalCurrency,
+          baseCurrencyAtTime: currencyFields.baseCurrencyAtTime,
+          exchangeRate: currencyFields.exchangeRate,
+          rateSource: currencyFields.rateSource,
+          exchangeRateFetchedAt: currencyFields.exchangeRateFetchedAt,
+          isRecurring: false,
+          nextRecurringDate: null,
+          recurringInterval: null,
         };
       }),
     );
 
-    const result = await TransactionModel.bulkWrite(bulkOps, {
-      ordered: true,
-    });
+    /**
+     * `bulkWrite(..., { ordered: true })` becomes one multi-row INSERT, which
+     * is atomic: an invalid row aborts the whole statement. Ordered bulkWrite
+     * stopped at the first failure but KEPT everything already inserted, so a
+     * half-applied import was possible. All-or-nothing is the safer reading of
+     * "ordered" and is what an import needs.
+     *
+     * `lastProcesses: null` is dropped - it was a typo for `lastProcessed`, so
+     * mongoose discarded it as an unknown path and it never reached a document.
+     */
+    const created = await transactionRepo.createMany(rows as never);
 
     return {
-      insertedCount: result.insertedCount,
+      insertedCount: created.length,
       success: true,
     };
   } catch (error) {

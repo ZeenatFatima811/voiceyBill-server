@@ -1,5 +1,6 @@
-import { Request, Response, NextFunction } from "express";
 import { randomUUID } from "crypto";
+
+import { type Request, type Response, type NextFunction } from "express";
 
 /**
  * Global response-time instrumentation for every request.

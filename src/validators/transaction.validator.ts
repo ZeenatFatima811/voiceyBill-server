@@ -1,9 +1,10 @@
 import { z } from "zod";
+
 import {
   PaymentMethodEnum,
   RecurringIntervalEnum,
   TransactionTypeEnum,
-} from "../models/transaction.model";
+} from "../enums/domain.enum";
 import { isValidCurrencyCode } from "../utils/currency.constants";
 
 export const transactionIdSchema = z.string().trim().min(1);

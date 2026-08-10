@@ -1,5 +1,5 @@
 // Must stay first: `Env` is evaluated at import time and throws on a missing
-// MONGO_URI, so the .env file has to be loaded before any other module here.
+// DATABASE_URL, so the .env file has to be loaded before any other module here.
 import "dotenv/config";
 
 import express, { type Express, type Request, type Response } from "express";

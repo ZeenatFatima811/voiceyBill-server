@@ -1,4 +1,4 @@
-import { ReportType } from "../@types/report.type";
+import { type ReportType } from "../@types/report.type";
 
 export const toReportEmailDTO = (
   report: any,

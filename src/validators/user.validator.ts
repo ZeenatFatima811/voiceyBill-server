@@ -1,5 +1,7 @@
 import { z } from "zod";
+
 import { isValidCurrencyCode } from "../utils/currency.constants";
+
 import { passwordSchema } from "./auth.validator";
 
 export const updateUserSchema = z.object({

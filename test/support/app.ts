@@ -27,7 +27,12 @@ const TEST_ENV: Record<string, string> = {
   NODE_ENV: "test",
   PORT: "0",
   BASE_PATH: "/api",
-  MONGO_URI: "mongodb://127.0.0.1:27017/unused-in-tests",
+  /**
+   * Never connected to. `config/database.config` is stubbed below, so no query
+   * reaches a server — this only satisfies `Env`, which validates at import
+   * time and now requires DATABASE_URL with no fallback.
+   */
+  DATABASE_URL: "postgresql://unused:unused@127.0.0.1:5432/unused-in-tests",
   JWT_SECRET,
   OPENAI_API_KEY: "test-openai-key",
   UPLIFT_AI_API_KEY: "test-uplift-key",
@@ -69,6 +74,7 @@ export const dbConnect = recorder("ensureDatabaseConnection");
 
 stubModule("config/database.config", {
   connctDatabase: async () => {},
+  isDatabaseConnected: () => true,
   ensureDatabaseConnection: (
     _req: unknown,
     _res: unknown,

@@ -1,19 +1,20 @@
-import mongoose from "mongoose";
-import ReportSettingModel, { ReportFrequencyEnum } from "../models/report-setting.model";
-import ReportModel, { ReportStatusEnum } from "../models/report.model";
-import TransactionModel, {
-  TransactionTypeEnum,
-} from "../models/transaction.model";
-import UserModel from "../models/user.model";
+import { format } from "date-fns";
+
+import { openai, openAIModel } from "../config/openai.config";
+import {
+  reports as reportRepo,
+  transactions as transactionRepo,
+  users as userRepo,
+  type Executor,
+} from "../db/repositories";
+import { toReportEmailDTO } from "../dto/report.dto";
+import { ReportFrequencyEnum, ReportStatusEnum } from "../enums/domain.enum";
+import { sendReportEmail } from "../mailers/report.mailer";
 import { NotFoundException } from "../utils/app-error";
+import { convertToDollarUnit } from "../utils/format-currency";
 import { calculateNextReportDate } from "../utils/helper";
 import { reportInsightPrompt } from "../utils/prompt";
-import { UpdateReportSettingType } from "../validators/report.validator";
-import { convertToDollarUnit } from "../utils/format-currency";
-import { format } from "date-fns";
-import { openai, openAIModel } from "../config/openai.config";
-import { sendReportEmail } from "../mailers/report.mailer";
-import { toReportEmailDTO } from "../dto/report.dto";
+import type { UpdateReportSettingType } from "../validators/report.validator";
 
 export const getAllReportsService = async (
   userId: string,
@@ -22,14 +23,12 @@ export const getAllReportsService = async (
     pageNumber: number;
   },
 ) => {
-  const query: Record<string, any> = { userId };
-
   const { pageSize, pageNumber } = pagination;
   const skip = (pageNumber - 1) * pageSize;
 
   const [reports, totalCount] = await Promise.all([
-    ReportModel.find(query).skip(skip).limit(pageSize).sort({ createdAt: -1 }),
-    ReportModel.countDocuments(query),
+    reportRepo.listByUser(userId, { skip, limit: pageSize }),
+    reportRepo.countByUser(userId),
   ]);
 
   const totalPages = Math.ceil(totalCount / pageSize);
@@ -53,9 +52,7 @@ export const updateReportSettingService = async (
   const { isEnabled } = body;
   let nextReportDate: Date | null = null;
 
-  const existingReportSetting = await ReportSettingModel.findOne({
-    userId,
-  });
+  const existingReportSetting = await reportRepo.findSettingByUser(userId);
   if (!existingReportSetting)
     throw new NotFoundException("Report setting not found");
 
@@ -66,20 +63,21 @@ export const updateReportSettingService = async (
     const currentNextReportDate = existingReportSetting.nextReportDate;
     const now = new Date();
     if (!currentNextReportDate || currentNextReportDate <= now) {
+      // `lastSentDate` is `Date | null` here where mongoose typed it optional.
+      // `calculateNextReportDate` treats a missing value as "no previous send",
+      // so null and undefined mean the same thing to it.
       nextReportDate = calculateNextReportDate(
-        existingReportSetting.lastSentDate,
+        existingReportSetting.lastSentDate ?? undefined,
       );
     } else {
       nextReportDate = currentNextReportDate;
     }
   }
 
-  existingReportSetting.set({
+  await reportRepo.updateSetting(userId, {
     ...body,
     nextReportDate,
   });
-
-  await existingReportSetting.save();
 };
 
 export const generateReportService = async (
@@ -87,93 +85,28 @@ export const generateReportService = async (
   fromDate: Date,
   toDate: Date,
   baseCurrency: string = "USD",
-  session?: mongoose.ClientSession
+  exec?: Executor,
 ) => {
-  const results = await TransactionModel.aggregate([
-    {
-      $match: {
-        userId: new mongoose.Types.ObjectId(userId),
-        date: { $gte: fromDate, $lte: toDate },
-      },
-    },
-    {
-      $facet: {
-        summary: [
-          {
-            $group: {
-              _id: null,
-              totalIncome: {
-                $sum: {
-                  $cond: [
-                    { $eq: ["$type", TransactionTypeEnum.INCOME] },
-                    { $abs: "$amount" },
-                    0,
-                  ],
-                },
-              },
+  /**
+   * The `$facet` pipeline is now one CTE query in the repository — see
+   * `reportAggregate`. Totals come back in CENTS, exactly as the pipeline
+   * produced them, and are converted below.
+   */
+  const aggregate = await transactionRepo.reportAggregate(
+    userId,
+    fromDate,
+    toDate,
+    exec,
+  );
 
-              totalExpenses: {
-                $sum: {
-                  $cond: [
-                    { $eq: ["$type", TransactionTypeEnum.EXPENSE] },
-                    { $abs: "$amount" },
-                    0,
-                  ],
-                },
-              },
-            },
-          },
-        ],
-
-        categories: [
-          {
-            $match: { type: TransactionTypeEnum.EXPENSE },
-          },
-          {
-            $group: {
-              _id: { $toLower: "$category" },
-              total: { $sum: { $abs: "$amount" } },
-            },
-          },
-          {
-            $sort: { total: -1 },
-          },
-          {
-            $limit: 5,
-          },
-        ],
-
-        currencySummary: [
-          {
-            $match: {
-              originalCurrency: { $ne: null },
-            },
-          },
-          {
-            $group: {
-              _id: "$originalCurrency",
-              count: { $sum: 1 },
-            },
-          },
-          {
-            $sort: { count: -1 },
-          },
-        ],
-      },
-    },
+  const results = [
     {
-      $project: {
-        totalIncome: {
-          $arrayElemAt: ["$summary.totalIncome", 0],
-        },
-        totalExpenses: {
-          $arrayElemAt: ["$summary.totalExpenses", 0],
-        },
-        categories: 1,
-        currencySummary: 1,
-      },
+      totalIncome: aggregate.totalIncome,
+      totalExpenses: aggregate.totalExpenses,
+      categories: aggregate.categories,
+      currencySummary: aggregate.currencySummary,
     },
-  ]).session(session || null);
+  ];
 
   if (
     !results?.length ||
@@ -212,7 +145,7 @@ export const generateReportService = async (
     availableBalance,
     savingsRate,
     categories: byCategory,
-    periodLabel: periodLabel,
+    periodLabel,
     baseCurrency,
   });
 
@@ -223,8 +156,7 @@ export const generateReportService = async (
       transactionCount: cs.count,
     }));
 
-  await ReportModel.findOneAndUpdate(
-    { userId, startDate: fromDate, endDate: toDate },
+  await reportRepo.upsertForPeriod(
     {
       userId,
       period: periodLabel,
@@ -233,9 +165,9 @@ export const generateReportService = async (
       endDate: toDate,
       status: ReportStatusEnum.SENT,
       baseCurrency,
-      currencySummary: formattedCurrencySummary
+      currencySummary: formattedCurrencySummary,
     },
-    { upsert: true, new: true, setDefaultsOnInsert: true, session },
+    exec,
   );
 
   return {
@@ -313,10 +245,10 @@ function calculateSavingRate(totalIncome: number, totalExpenses: number) {
 }
 
 export const resendReportService = async (userId: string, reportId: string) => {
-  const savedReport = await ReportModel.findOne({ _id: reportId, userId });
+  const savedReport = await reportRepo.findById(reportId, userId);
   if (!savedReport) throw new NotFoundException("Report not found");
 
-  const user = await UserModel.findById(userId).lean();
+  const user = await userRepo.findById(userId);
   if (!user) throw new NotFoundException("User not found");
 
   const generatedReport = await generateReportService(

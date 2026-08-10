@@ -1,20 +1,21 @@
-import BudgetModel, { BudgetDocument } from "../models/budget.model";
-import UserModel from "../models/user.model";
+import type { BudgetApi } from "../db/mappers/budget.mapper";
+import { budgets as budgetRepo, users as userRepo } from "../db/repositories";
+import { toBudgetSummaryDTO, type BudgetSummaryDTO } from "../dto/budget.dto";
+import { ErrorCodeEnum } from "../enums/error-code.enum";
+import { sendBudgetAlertEmail } from "../mailers/budget-alert.mailer";
+import { sendBudgetIncreaseEmail } from "../mailers/budget-increase.mailer";
 import {
   BadRequestException,
   ConflictException,
   NotFoundException,
 } from "../utils/app-error";
-import { ErrorCodeEnum } from "../enums/error-code.enum";
 import {
-  CreateBudgetType,
+  type CreateBudgetType,
   UpdateBudgetType,
-  GetBudgetSummaryType,
-  DeleteBudgetType,
+  type GetBudgetSummaryType,
+  type DeleteBudgetType,
 } from "../validators/budget.validator";
-import { toBudgetSummaryDTO, BudgetSummaryDTO } from "../dto/budget.dto";
-import { sendBudgetAlertEmail } from "../mailers/budget-alert.mailer";
-import { sendBudgetIncreaseEmail } from "../mailers/budget-increase.mailer";
+
 import { getUserCategoryNames } from "./category.service";
 
 /**
@@ -59,7 +60,7 @@ function validateCategorySum(totalBudget: number, categoryLimits: Array<{ catego
 export async function createOrUpdateBudget(
   userId: string,
   data: CreateBudgetType
-): Promise<BudgetDocument> {
+): Promise<BudgetApi> {
   const { month, year, totalBudget, categoryLimits } = data;
 
   // Validate month/year
@@ -85,11 +86,7 @@ export async function createOrUpdateBudget(
   validateCategorySum(totalBudget, categoryLimits);
 
   // Check if budget already exists for this month/year
-  const existingBudget = await BudgetModel.findOne({
-    userId,
-    month,
-    year,
-  });
+  const existingBudget = await budgetRepo.findByMonth(userId, month, year);
 
   if (existingBudget) {
     // Detect budget increases for email notification
@@ -127,7 +124,7 @@ export async function createOrUpdateBudget(
     // Send budget increase email if there are increases
     if (budgetIncreases.length > 0) {
       try {
-        const user = await UserModel.findById(userId);
+        const user = await userRepo.findById(userId);
         if (user && user.email) {
           await sendBudgetIncreaseEmail({
             email: user.email,
@@ -145,22 +142,21 @@ export async function createOrUpdateBudget(
       }
     }
 
-    // Update existing budget
-    existingBudget.totalBudget = totalBudget;
-    existingBudget.categoryLimits = categoryLimits;
-    return existingBudget.save();
   }
 
-  // Create new budget
-  const newBudget = await BudgetModel.create({
-    userId,
-    month,
-    year,
-    totalBudget,
-    categoryLimits,
-  });
-
-  return newBudget;
+  /**
+   * One upsert for both branches.
+   *
+   * The Mongo version read, then either mutated-and-saved or created. Two
+   * concurrent saves for the same month could both find nothing and both
+   * insert, and only the unique index stopped the second — as an error, not a
+   * merge. `ON CONFLICT (user_id, month, year)` makes it a single atomic
+   * statement.
+   *
+   * The read above is still needed, but only to compute the increase
+   * notification, never to decide insert-vs-update.
+   */
+  return budgetRepo.upsert({ userId, month, year, totalBudget, categoryLimits });
 }
 
 /**
@@ -185,11 +181,7 @@ export async function getBudgetSummary(
     );
   }
 
-  const budget = await BudgetModel.findOne({
-    userId,
-    month,
-    year,
-  });
+  const budget = await budgetRepo.findByMonth(userId, month, year);
 
   // Get the summary (returns empty summary if no budget exists)
   const summary = await toBudgetSummaryDTO(budget, month, year, userId);
@@ -197,7 +189,7 @@ export async function getBudgetSummary(
   // Send budget alert email every time the budget summary is opened/refetched.
   if (summary.hasBudget && summary.alerts.length > 0) {
     try {
-      const user = await UserModel.findById(userId);
+      const user = await userRepo.findById(userId);
       if (user && user.email) {
         await sendBudgetAlertEmail({
           email: user.email,
@@ -227,11 +219,7 @@ export async function deleteBudget(
 ): Promise<{ success: boolean }> {
   const { month, year } = params;
 
-  const budget = await BudgetModel.findOneAndDelete({
-    userId,
-    month,
-    year,
-  });
+  const budget = await budgetRepo.remove(userId, month, year);
 
   if (!budget) {
     throw new NotFoundException(
@@ -246,13 +234,12 @@ export async function deleteBudget(
 /**
  * Get all budgets for a user (for history/overview)
  */
-export async function getUserBudgets(userId: string): Promise<BudgetDocument[]> {
-  const budgets = await BudgetModel.find({ userId }).sort({
-    year: -1,
-    month: -1,
-  });
-
-  return budgets;
+export async function getUserBudgets(userId: string): Promise<BudgetApi[]> {
+  // `year desc, month desc` — newest first, as the mongoose sort did. The
+  // repository lists ascending, so the order is reversed here rather than
+  // adding a second query shape.
+  const userBudgets = await budgetRepo.listByUser(userId);
+  return [...userBudgets].reverse();
 }
 
 /**
@@ -260,10 +247,10 @@ export async function getUserBudgets(userId: string): Promise<BudgetDocument[]> 
  */
 export async function getCurrentMonthBudget(
   userId: string
-): Promise<BudgetDocument | null> {
+): Promise<BudgetApi | null> {
   const now = new Date();
   const month = now.getMonth() + 1;
   const year = now.getFullYear();
 
-  return BudgetModel.findOne({ userId, month, year });
+  return budgetRepo.findByMonth(userId, month, year);
 }

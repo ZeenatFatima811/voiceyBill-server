@@ -1,0 +1,5 @@
+# Migration SQL is applied verbatim and its checksum is recorded in
+# drizzle/meta/_journal.json. A line-ending rewrite changes that checksum and
+# drizzle-kit then reports the migration as modified.
+drizzle/*.sql text eol=lf
+drizzle/meta/*.json text eol=lf
