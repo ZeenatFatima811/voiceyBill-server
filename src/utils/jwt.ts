@@ -1,4 +1,5 @@
-import jwt, { JwtPayload, SignOptions, VerifyOptions } from "jsonwebtoken";
+import jwt, { type JwtPayload, type SignOptions, type VerifyOptions } from "jsonwebtoken";
+
 import { Env } from "../config/env.config";
 
 type TimeUnit = "s" | "m" | "h" | "d" | "w" | "y";

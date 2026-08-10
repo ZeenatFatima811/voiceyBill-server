@@ -1,197 +1,74 @@
-import mongoose, { PipelineStage } from "mongoose";
-import { DateRangeEnum, DateRangePreset } from "../enums/date-range.enum";
-import TransactionModel, {
-  TransactionTypeEnum,
-} from "../models/transaction.model";
-import { getDateRange } from "../utils/date";
+/**
+ * Analytics service — ported from mongoose to the Postgres repository layer.
+ *
+ * The three `$facet`/`$group` pipelines are now SQL aggregates in the
+ * transaction repository. Everything the pipelines computed with `$project`
+ * expressions — savings percentage, expense ratio, the top-three/others split,
+ * percentage change against the previous period — is done here in TypeScript,
+ * because it is arithmetic over a handful of numbers rather than work the
+ * database should be doing.
+ *
+ * Amounts arrive in CENTS from the repository, exactly as the pipelines emitted
+ * them, and `convertToDollarUnit` is applied at the same points as before.
+ */
 import { differenceInDays, subDays, subYears } from "date-fns";
+
+import { transactions as transactionRepo } from "../db/repositories";
+import { DateRangeEnum, type DateRangePreset } from "../enums/date-range.enum";
+import { getDateRange } from "../utils/date";
 import { convertToDollarUnit } from "../utils/format-currency";
 
 export const summaryAnalyticsService = async (
   userId: string,
   dateRangePreset?: DateRangePreset,
   customFrom?: Date,
-  customTo?: Date
+  customTo?: Date,
 ) => {
   const range = getDateRange(dateRangePreset, customFrom, customTo);
 
   const { from, to, value: rangeValue } = range;
 
-  const currentPeriodPipeline: PipelineStage[] = [
-    {
-      $match: {
-        userId: new mongoose.Types.ObjectId(userId),
-        ...(from &&
-          to && {
-            date: {
-              $gte: from,
-              $lte: to,
-            },
-          }),
-      },
-    },
-    {
-      $group: {
-        _id: null,
-        totalIncome: {
-          $sum: {
-            $cond: [
-              { $eq: ["$type", TransactionTypeEnum.INCOME] },
-              { $abs: "$amount" },
-              0,
-            ],
-          },
-        },
-        totalExpenses: {
-          $sum: {
-            $cond: [
-              { $eq: ["$type", TransactionTypeEnum.EXPENSE] },
-              { $abs: "$amount" },
-              0,
-            ],
-          },
-        },
-
-        transactionCount: { $sum: 1 },
-      },
-    },
-    {
-      $project: {
-        _id: 0,
-        totalIncome: 1,
-        totalExpenses: 1,
-        transactionCount: 1,
-
-        availableBalance: { $subtract: ["$totalIncome", "$totalExpenses"] },
-
-        savingData: {
-          $let: {
-            vars: {
-              income: { $ifNull: ["$totalIncome", 0] },
-              expenses: { $ifNull: ["$totalExpenses", 0] },
-            },
-            in: {
-              // ((income - expenses) / income) * 100;
-              savingsPercentage: {
-                $cond: [
-                  { $lte: ["$$income", 0] },
-                  0,
-                  {
-                    $multiply: [
-                      {
-                        $divide: [
-                          { $subtract: ["$$income", "$$expenses"] },
-                          "$$income",
-                        ],
-                      },
-                      100,
-                    ],
-                  },
-                ],
-              },
-
-              //Expense Ratio = (expenses / income) * 100
-              expenseRatio: {
-                $cond: [
-                  { $lte: ["$$income", 0] },
-                  0,
-                  {
-                    $multiply: [
-                      {
-                        $divide: ["$$expenses", "$$income"],
-                      },
-                      100,
-                    ],
-                  },
-                ],
-              },
-            },
-          },
-        },
-      },
-    },
-  ];
-
-  // PERF: the previous-period pipeline depends only on the requested range
-  // (not on the current-period result), so build it up front and run both
-  // aggregations in parallel instead of sequentially.
-  const needsPrevious = !!(
-    from &&
-    to &&
-    rangeValue !== DateRangeEnum.ALL_TIME
-  );
+  // PERF: the previous-period query depends only on the requested range (not on
+  // the current-period result), so both run concurrently.
+  const needsPrevious = !!(from && to && rangeValue !== DateRangeEnum.ALL_TIME);
 
   let prevPeriodFrom: Date | null = null;
   let prevPeriodTo: Date | null = null;
-  let prevPeriodPipeline: PipelineStage[] | null = null;
 
   if (needsPrevious && from && to) {
     const period = differenceInDays(to, from) + 1;
-    const isYearly = [
-      DateRangeEnum.LAST_YEAR,
-      DateRangeEnum.THIS_YEAR,
-    ].includes(rangeValue);
+    const isYearly = [DateRangeEnum.LAST_YEAR, DateRangeEnum.THIS_YEAR].includes(
+      rangeValue as DateRangeEnum,
+    );
 
     prevPeriodFrom = isYearly ? subYears(from, 1) : subDays(from, period);
     prevPeriodTo = isYearly ? subYears(to, 1) : subDays(to, period);
-
-    prevPeriodPipeline = [
-      {
-        $match: {
-          userId: new mongoose.Types.ObjectId(userId),
-          date: {
-            $gte: prevPeriodFrom,
-            $lte: prevPeriodTo,
-          },
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          totalIncome: {
-            $sum: {
-              $cond: [
-                { $eq: ["$type", TransactionTypeEnum.INCOME] },
-                { $abs: "$amount" },
-                0,
-              ],
-            },
-          },
-          totalExpenses: {
-            $sum: {
-              $cond: [
-                { $eq: ["$type", TransactionTypeEnum.EXPENSE] },
-                { $abs: "$amount" },
-                0,
-              ],
-            },
-          },
-        },
-      },
-    ];
   }
 
-  // PERF: current + previous period aggregations run concurrently.
-  const [currentResult, previousResult] = await Promise.all([
-    TransactionModel.aggregate(currentPeriodPipeline),
-    prevPeriodPipeline
-      ? TransactionModel.aggregate(prevPeriodPipeline)
-      : Promise.resolve([] as Record<string, number>[]),
+  const [current, previous] = await Promise.all([
+    transactionRepo.summaryAggregate(userId, from, to),
+    prevPeriodFrom && prevPeriodTo
+      ? transactionRepo.summaryAggregate(userId, prevPeriodFrom, prevPeriodTo)
+      : Promise.resolve(null),
   ]);
 
-  const current = currentResult[0];
-  const previous = previousResult[0];
+  const totalIncome = current?.totalIncome ?? 0;
+  const totalExpenses = current?.totalExpenses ?? 0;
+  const transactionCount = current?.transactionCount ?? 0;
+  const availableBalance = current ? totalIncome - totalExpenses : 0;
 
-  const {
-    totalIncome = 0,
-    totalExpenses = 0,
-    availableBalance = 0,
-    transactionCount = 0,
-    savingData = {
-      expenseRatio: 0,
-      savingsPercentage: 0,
-    },
-  } = current || {};
+  /**
+   * The `$let` block from the original `$project`, verbatim in arithmetic:
+   * both ratios are defined as 0 when income is not positive, which is what
+   * kept a user with only expenses from producing -Infinity.
+   */
+  const savingData = current
+    ? {
+        savingsPercentage:
+          totalIncome <= 0 ? 0 : ((totalIncome - totalExpenses) / totalIncome) * 100,
+        expenseRatio: totalIncome <= 0 ? 0 : (totalExpenses / totalIncome) * 100,
+      }
+    : { savingsPercentage: 0, expenseRatio: 0 };
 
   let percentageChange: any = {
     income: 0,
@@ -215,8 +92,8 @@ export const summaryAnalyticsService = async (
       income: calaulatePercentageChange(prevIncome, totalIncome),
       expenses: calaulatePercentageChange(prevExpenses, totalExpenses),
       balance: calaulatePercentageChange(prevBalance, availableBalance),
-      prevPeriodFrom: prevPeriodFrom,
-      prevPeriodTo: prevPeriodTo,
+      prevPeriodFrom,
+      prevPeriodTo,
       previousValues: {
         incomeAmount: prevIncome,
         expenseAmount: prevExpenses,
@@ -237,15 +114,9 @@ export const summaryAnalyticsService = async (
     percentageChange: {
       ...percentageChange,
       previousValues: {
-        incomeAmount: convertToDollarUnit(
-          percentageChange.previousValues.incomeAmount
-        ),
-        expenseAmount: convertToDollarUnit(
-          percentageChange.previousValues.expenseAmount
-        ),
-        balanceAmount: convertToDollarUnit(
-          percentageChange.previousValues.balanceAmount
-        ),
+        incomeAmount: convertToDollarUnit(percentageChange.previousValues.incomeAmount),
+        expenseAmount: convertToDollarUnit(percentageChange.previousValues.expenseAmount),
+        balanceAmount: convertToDollarUnit(percentageChange.previousValues.balanceAmount),
       },
     },
     preset: {
@@ -260,112 +131,41 @@ export const chartAnalyticsService = async (
   userId: string,
   dateRangePreset?: DateRangePreset,
   customFrom?: Date,
-  customTo?: Date
+  customTo?: Date,
 ) => {
   const range = getDateRange(dateRangePreset, customFrom, customTo);
   const { from, to, value: rangeValue } = range;
 
-  const filter: any = {
-    userId: new mongoose.Types.ObjectId(userId),
-    ...(from &&
-      to && {
-        date: {
-          $gte: from,
-          $lte: to,
-        },
-      }),
-  };
+  const points = await transactionRepo.chartAggregate(userId, from, to);
 
-  const result = await TransactionModel.aggregate([
-    { $match: filter },
-    //Group the transaction by date (YYYY-MM-DD)
-    {
-      $group: {
-        _id: {
-          $dateToString: {
-            format: "%Y-%m-%d",
-            date: "$date",
-          },
-        },
-
-        income: {
-          $sum: {
-            $cond: [
-              { $eq: ["$type", TransactionTypeEnum.INCOME] },
-              { $abs: "$amount" },
-              0,
-            ],
-          },
-        },
-
-        expenses: {
-          $sum: {
-            $cond: [
-              { $eq: ["$type", TransactionTypeEnum.EXPENSE] },
-              { $abs: "$amount" },
-              0,
-            ],
-          },
-        },
-
-        incomeCount: {
-          $sum: {
-            $cond: [{ $eq: ["$type", TransactionTypeEnum.INCOME] }, 1, 0],
-          },
-        },
-
-        expenseCount: {
-          $sum: {
-            $cond: [{ $eq: ["$type", TransactionTypeEnum.EXPENSE] }, 1, 0],
-          },
-        },
-      },
-    },
-
-    { $sort: { _id: 1 } },
-
-    {
-      $project: {
-        _id: 0,
-        date: "$_id",
-        income: 1,
-        expenses: 1,
-        incomeCount: 1,
-        expenseCount: 1,
-      },
-    },
-
-    {
-      $group: {
-        _id: null,
-        chartData: { $push: "$$ROOT" },
-        totalIncomeCount: { $sum: "$incomeCount" },
-        totalExpenseCount: { $sum: "$expenseCount" },
-      },
-    },
-
-    {
-      $project: {
-        _id: 0,
-        chartData: 1,
-        totalIncomeCount: 1,
-        totalExpenseCount: 1,
-      },
-    },
-  ]);
-
-  const resultData = result[0] || {};
-
-  const transaformedData = (resultData?.chartData || []).map((item: any) => ({
+  const transaformedData = points.map((item) => ({
     date: item.date,
     income: convertToDollarUnit(item.income),
     expenses: convertToDollarUnit(item.expenses),
   }));
 
+  /**
+   * `undefined`, not 0, when nothing matched.
+   *
+   * The final `$group: { _id: null }` emitted no document for an empty range,
+   * so `resultData` was `{}` and both counts came back undefined. The clients
+   * receive that as a missing key; defaulting to 0 here would change the
+   * payload.
+   */
+  const totals = points.length
+    ? points.reduce(
+        (acc, item) => ({
+          totalIncomeCount: acc.totalIncomeCount + item.incomeCount,
+          totalExpenseCount: acc.totalExpenseCount + item.expenseCount,
+        }),
+        { totalIncomeCount: 0, totalExpenseCount: 0 },
+      )
+    : { totalIncomeCount: undefined, totalExpenseCount: undefined };
+
   return {
     chartData: transaformedData,
-    totalIncomeCount: resultData.totalIncomeCount,
-    totalExpenseCount: resultData.totalExpenseCount,
+    totalIncomeCount: totals.totalIncomeCount,
+    totalExpenseCount: totals.totalExpenseCount,
     preset: {
       ...range,
       value: rangeValue || DateRangeEnum.ALL_TIME,
@@ -378,115 +178,53 @@ export const expensePieChartBreakdownService = async (
   userId: string,
   dateRangePreset?: DateRangePreset,
   customFrom?: Date,
-  customTo?: Date
+  customTo?: Date,
 ) => {
   const range = getDateRange(dateRangePreset, customFrom, customTo);
   const { from, to, value: rangeValue } = range;
 
-  const filter: any = {
-    userId: new mongoose.Types.ObjectId(userId),
-    type: TransactionTypeEnum.EXPENSE,
-    ...(from &&
-      to && {
-        date: {
-          $gte: from,
-          $lte: to,
-        },
-      }),
-  };
+  const categories = await transactionRepo.expenseByCategory(userId, from, to);
 
-  const pipleline: PipelineStage[] = [
-    {
-      $match: filter,
-    },
-    {
-      $group: {
-        _id: { $toLower: "$category" },
-        value: { $sum: { $abs: "$amount" } },
-      },
-    },
-    { $sort: { value: -1 } }, //
-
-    {
-      $facet: {
-        topThree: [{ $limit: 3 }],
-        others: [
-          { $skip: 3 },
-          {
-            $group: {
-              _id: "others",
-              value: { $sum: "$value" },
-            },
-          },
-        ],
-      },
-    },
-
-    {
-      $project: {
-        categories: {
-          $concatArrays: ["$topThree", "$others"],
-        },
-      },
-    },
-
-    { $unwind: "$categories" },
-
-    {
-      $group: {
-        _id: null,
-        totalSpent: { $sum: "$categories.value" },
-        breakdown: { $push: "$categories" },
-      },
-    },
-
-    {
-      $project: {
-        _id: 0,
-        totalSpent: 1,
-        breakdown: {
-          // .map((cat: any)=> )
-          $map: {
-            input: "$breakdown",
-            as: "cat",
-            in: {
-              name: "$$cat._id",
-              value: "$$cat.value",
-              percentage: {
-                $cond: [
-                  { $eq: ["$totalSpent", 0] },
-                  0,
-                  {
-                    $round: [
-                      {
-                        $multiply: [
-                          { $divide: ["$$cat.value", "$totalSpent"] },
-                          100,
-                        ],
-                      },
-                      2,
-                    ],
-                  },
-                ],
-              },
-            },
-          },
-        },
-      },
-    },
+  /**
+   * The `$facet` top-three / "others" split, in JS.
+   *
+   * The "others" row appears ONLY when there are more than three categories.
+   * In the pipeline that branch was `[{ $skip: 3 }, { $group: … }]`, and a
+   * `$group` over zero documents emits no document at all — so three or fewer
+   * categories produced no "others" entry, and zero categories produced an
+   * empty breakdown rather than a single zero row. Appending it
+   * unconditionally is the obvious mistake here, and
+   * `analytics.pie.zero-total` is the case that catches it.
+   */
+  const topThree = categories.slice(0, 3);
+  const rest = categories.slice(3);
+  const breakdownSource = [
+    ...topThree,
+    ...(rest.length
+      ? [{ name: "others", value: rest.reduce((sum, entry) => sum + entry.value, 0) }]
+      : []),
   ];
 
-  const result = await TransactionModel.aggregate(pipleline);
+  const totalSpent = breakdownSource.reduce((sum, entry) => sum + entry.value, 0);
 
-  const data = result[0] || {
-    totalSpent: 0,
-    breakdown: [],
-  };
+  const breakdown = breakdownSource.map((entry) => ({
+    name: entry.name,
+    value: entry.value,
+    // `$round` to 2dp, and 0 when there is nothing to divide by.
+    percentage:
+      totalSpent === 0 ? 0 : Math.round((entry.value / totalSpent) * 100 * 100) / 100,
+  }));
+
   const transformedData = {
-    totalSpent: convertToDollarUnit(data.totalSpent),
-    breakdown: data.breakdown.map((item: any) => ({
+    totalSpent: convertToDollarUnit(totalSpent),
+    breakdown: breakdown.map((item: any) => ({
       ...item,
-      name: item.name ? item.name.split(" ").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ") : "",
+      name: item.name
+        ? item.name
+            .split(" ")
+            .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+            .join(" ")
+        : "",
       value: convertToDollarUnit(item.value),
     })),
   };

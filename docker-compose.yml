@@ -1,19 +1,25 @@
 services:
-  mongo:
-    image: mongo:7
-    container_name: voiceybill-mongo
+  # The application database. `docker compose up -d postgres` is all a local dev
+  # setup needs; point DATABASE_URL at it (see .env.example).
+  postgres:
+    image: postgres:17
+    container_name: voiceybill-postgres
     restart: unless-stopped
     ports:
-      - "27017:27017"
+      - "5432:5432"
     environment:
-      MONGO_INITDB_DATABASE: voiceybill
+      POSTGRES_USER: voiceybill
+      POSTGRES_PASSWORD: voiceybill
+      POSTGRES_DB: voiceybill
     volumes:
-      - voiceybill-mongo-data:/data/db
+      - voiceybill-postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.runCommand({ ping: 1 })"]
+      test: ["CMD-SHELL", "pg_isready -U voiceybill -d voiceybill"]
       interval: 10s
       timeout: 5s
       retries: 5
 
+# One service is all this project needs. `npm run db:check` runs its integration
+# assertions against this same instance.
 volumes:
-  voiceybill-mongo-data:
+  voiceybill-postgres-data:

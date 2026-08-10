@@ -1,7 +1,6 @@
 import axios from "axios";
-import SupportedCurrencyCacheModel from "../../models/supported-currency-cache.model";
-import ExchangeRateCacheModel from "../../models/exchange-rate-cache.model";
-import { connctDatabase } from "../../config/database.config";
+
+import { currency as currencyRepo, withTransaction } from "../../db/repositories";
 export const updateSupportedCurrenciesCache = async () => {
   try {
     const providerUrl = process.env.EXCHANGE_RATE_PROVIDER_URL;
@@ -13,13 +12,17 @@ export const updateSupportedCurrenciesCache = async () => {
 
     if (currencies && currencies.length > 0) {
       // Clear and bulk insert fresh currency definitions
-      await SupportedCurrencyCacheModel.deleteMany({});
+      // Delete-then-insert in ONE transaction. The Mongo version issued the
+      // two statements separately, so a failure between them left the cache
+      // empty and every currency lookup falling back to the hardcoded list.
+      // The executor has to be threaded in for that to be true — without it
+      // the DELETE autocommits on its own connection and the window is still
+      // open.
       const docs = currencies.map((c) => ({
         code: c.iso_code,
         name: c.name,
-        updatedAt: new Date(),
       }));
-      await SupportedCurrencyCacheModel.insertMany(docs);
+      await withTransaction((tx) => currencyRepo.replaceSupported(docs, tx));
       console.log(`⏰ Successfully cached ${docs.length} supported currencies`);
       return { success: true, count: docs.length };
     }
@@ -36,8 +39,6 @@ export const updateExchangeRatesCache = async () => {
   const PROVIDER_BASE_URL=process.env.EXCHANGE_RATE_PROVIDER_URL
   const TIMEOUT=Number(process.env.EXCHANGE_RATE_TIMEOUT_MS)
   try {
-    await connctDatabase();
-
     console.log(`Starting exchange rates cache update...`);
     const response = await axios.get(`${PROVIDER_BASE_URL}/rates`, {
       params: { base: "USD" },
@@ -51,23 +52,25 @@ export const updateExchangeRatesCache = async () => {
       return { success: false, error: "Empty rates list" };
     }
 
-    const bulkOps = rates.map((r) => ({
-      updateOne: {
-        filter: { fromCurrency: "USD", toCurrency: r.quote },
-        update: {
-          $set: {
-            fromCurrency: "USD",
-            toCurrency: r.quote,
-            rate: r.rate,
-            rateDate: r.date,
-            fetchedAt: new Date(),
-          },
-        },
-        upsert: true,
-      },
-    }));
-
-    await ExchangeRateCacheModel.bulkWrite(bulkOps);
+    /**
+     * `bulkWrite` of upserts becomes one multi-row ON CONFLICT — which is why
+     * exchange_rate_cache carries a unique index on the currency pair.
+     *
+     * One deliberate behaviour difference: Mongo accumulated a row per fetch,
+     * whereas this keeps one row per pair. Nothing reads the history — every
+     * lookup is "freshest rate for this pair", bounded by MAX_CACHE_AGE_MS — but
+     * the history stops growing.
+     */
+    const fetchedAt = new Date();
+    await currencyRepo.upsertRates(
+      rates.map((r) => ({
+        fromCurrency: "USD",
+        toCurrency: r.quote,
+        rate: r.rate,
+        rateDate: r.date,
+        fetchedAt,
+      })),
+    );
     console.log(`✅ Cached ${rates.length} exchange rates`);
     return { success: true, count: rates.length };
   } catch (error: any) {

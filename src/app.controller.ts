@@ -1,6 +1,6 @@
 import { Controller, Get } from "@nestjs/common";
-import mongoose from "mongoose";
 
+import { isDatabaseConnected } from "./config/database.config";
 import { Env } from "./config/env.config";
 
 /**
@@ -21,13 +21,12 @@ export class AppController {
   }
 
   @Get("/health")
-  getHealth() {
+  async getHealth() {
     return {
       status: "healthy",
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
-      database:
-        mongoose.connection.readyState === 1 ? "connected" : "disconnected",
+      database: (await isDatabaseConnected()) ? "connected" : "disconnected",
     };
   }
 

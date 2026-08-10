@@ -1,5 +1,6 @@
-import { OTP_EXPIRATION_MINUTES } from "../utils/otp";
 import { Env } from "../config/env.config";
+import { OTP_EXPIRATION_MINUTES } from "../utils/otp";
+
 import { sendEmail } from "./mailer";
 import { getVerificationEmailTemplate } from "./templates/verification.template";
 

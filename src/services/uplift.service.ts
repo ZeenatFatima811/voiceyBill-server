@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
-import { TranscriptionResponse } from "../@types/voice.type";
+
+import { type TranscriptionResponse } from "../@types/voice.type";
 import { voiceConfig } from "../config/voice.config";
 import { AppError } from "../utils/app-error";
 

@@ -1,4 +1,5 @@
 import crypto from "crypto";
+
 import { compareValue, hashValue } from "./bcrypt";
 
 export const OTP_EXPIRATION_MINUTES = 10;

@@ -5,8 +5,19 @@ const envConfig = () => ({
 
   PORT: getEnv("PORT", "8000"),
   BASE_PATH: getEnv("BASE_PATH", "/api"),
-  MONGO_URI: getEnv("MONGO_URI"),
-  MONGO_DB_NAME: getEnv("MONGO_DB_NAME", "voiceybill"),
+  /**
+   * Postgres connection string. REQUIRED — there is no fallback.
+   *
+   * It carried a local default while both databases coexisted, so existing dev
+   * setups kept working mid-migration. Now that Postgres is the only database,
+   * a default would let a misconfigured deployment start up and quietly point
+   * at localhost instead of failing loudly.
+   *
+   * Deployed environments must use a POOLED connection string (Neon's
+   * `-pooler` host, or PgBouncer). See src/db/client.ts: a direct connection
+   * exhausts the server once Vercel scales the function out.
+   */
+  DATABASE_URL: getEnv("DATABASE_URL"),
 
   JWT_SECRET: getEnv("JWT_SECRET", "secert_jwt"),
   JWT_EXPIRES_IN: getEnv("JWT_EXPIRES_IN", "15m") as string,

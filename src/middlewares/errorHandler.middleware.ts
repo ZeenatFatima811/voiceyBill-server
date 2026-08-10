@@ -1,10 +1,11 @@
-import { Response } from "express";
-import { z, ZodError } from "zod";
-import { ErrorRequestHandler } from "express";
-import { HTTPSTATUS } from "../config/http.config";
-import { AppError } from "../utils/app-error";
-import { ErrorCodeEnum } from "../enums/error-code.enum";
+import { type Response } from "express";
+import { type ErrorRequestHandler } from "express";
 import { MulterError } from "multer";
+import { type z, ZodError } from "zod";
+
+import { HTTPSTATUS } from "../config/http.config";
+import { ErrorCodeEnum } from "../enums/error-code.enum";
+import { AppError } from "../utils/app-error";
 
 const formatZodError = (res: Response, error: z.ZodError) => {
   const errors = error?.issues?.map((err) => ({

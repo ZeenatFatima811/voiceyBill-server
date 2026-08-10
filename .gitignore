@@ -22,3 +22,7 @@ logs/
 .vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
+
+# ─── Local notes ──────────────────────────────────────────────────────────────
+# Migration working notes, kept on the author's machine rather than in the repo.
+docs/postgres-migration.md

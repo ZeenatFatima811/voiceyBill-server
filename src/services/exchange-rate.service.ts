@@ -1,8 +1,8 @@
 import axios from "axios";
-import ExchangeRateCacheModel from "../models/exchange-rate-cache.model";
-import SupportedCurrencyCacheModel from "../models/supported-currency-cache.model";
-import { FALLBACK_SUPPORTED_CURRENCIES, CURRENCY_METADATA } from "../utils/currency.constants";
+
+import { currency as currencyRepo, withTransaction } from "../db/repositories";
 import { InternalServerException } from "../utils/app-error";
+import { FALLBACK_SUPPORTED_CURRENCIES, CURRENCY_METADATA } from "../utils/currency.constants";
 const PROVIDER_BASE_URL = process.env.EXCHANGE_RATE_PROVIDER_URL;
 const REQUEST_TIMEOUT_MS = Number(process.env.EXCHANGE_RATE_TIMEOUT_MS);
 
@@ -28,10 +28,10 @@ export class ExchangeRateService {
     const [rateFrom, rateTo] = await Promise.all([
       fromUpper === "USD"
         ? { rate: 1, fetchedAt: new Date(), rateDate: new Date().toISOString().split("T")[0] }
-        : ExchangeRateCacheModel.findOne({ fromCurrency: "USD", toCurrency: fromUpper }),
+        : currencyRepo.findRate("USD", fromUpper),
       toUpper === "USD"
         ? { rate: 1, fetchedAt: new Date(), rateDate: new Date().toISOString().split("T")[0] }
-        : ExchangeRateCacheModel.findOne({ fromCurrency: "USD", toCurrency: toUpper }),
+        : currencyRepo.findRate("USD", toUpper),
     ]);
 
     if (rateFrom && rateTo && this.isFresh(rateFrom) && this.isFresh(rateTo)) {
@@ -57,17 +57,17 @@ export class ExchangeRateService {
 
       if (rate && typeof rate === "number") {
         // Store direct pair for future use
-        ExchangeRateCacheModel.findOneAndUpdate(
-          { fromCurrency: fromUpper, toCurrency: toUpper },
-          {
+        // Fire-and-forget, exactly as before: caching the pair must never
+        // delay or fail the response that already has its rate.
+        currencyRepo
+          .upsertRate({
             fromCurrency: fromUpper,
             toCurrency: toUpper,
             rate,
             rateDate,
             fetchedAt: new Date(),
-          },
-          { upsert: true }
-        ).catch(console.warn);
+          })
+          .catch(console.warn);
 
         return { rate, source: "live", rateDate };
       }
@@ -92,7 +92,7 @@ export class ExchangeRateService {
  async getSupportedCurrencies(): Promise<Record<string, string>> {
     try {
       // 1. Attempt to fetch from MongoDB cache
-      const cached = await SupportedCurrencyCacheModel.find({});
+      const cached = await currencyRepo.listSupported();
       if (cached.length > 0) {
         return cached.reduce<Record<string, string>>((acc, curr) => {
           acc[curr.code] = curr.name;
@@ -109,13 +109,16 @@ export class ExchangeRateService {
       const currenciesList: Array<{ iso_code: string; name: string }> = response.data || [];
 
       if (currenciesList.length > 0) {
-        await SupportedCurrencyCacheModel.deleteMany({});
-        await SupportedCurrencyCacheModel.insertMany(
-          currenciesList.map((c) => ({
-            code: c.iso_code,
-            name: c.name,
-            updatedAt: new Date(),
-          }))
+        // Delete-then-insert in ONE transaction. Issued separately, a failure
+        // between them left the cache empty and every lookup falling back to
+        // the hardcoded list. The executor has to be threaded in for that to
+        // hold — `replaceSupported` cannot open the transaction itself without
+        // taking it away from callers that need to compose with one.
+        await withTransaction((tx) =>
+          currencyRepo.replaceSupported(
+            currenciesList.map((c) => ({ code: c.iso_code, name: c.name })),
+            tx,
+          ),
         );
 
         return Object.fromEntries(

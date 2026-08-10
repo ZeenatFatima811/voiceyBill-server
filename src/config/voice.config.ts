@@ -1,4 +1,5 @@
-import { VoiceConfig } from '../@types/voice.type';
+import { type VoiceConfig } from '../@types/voice.type';
+
 import { Env } from './env.config';
 
 export const voiceConfig: VoiceConfig = {

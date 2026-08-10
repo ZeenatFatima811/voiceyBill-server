@@ -1,8 +1,6 @@
-import UserModel from "../models/user.model";
-import {
-  exchangeRateService,
-  ExchangeRateResult,
-} from "./exchange-rate.service";
+import { users as userRepo } from "../db/repositories";
+
+import { exchangeRateService, type ExchangeRateResult } from "./exchange-rate.service";
 
 export type CurrencyConversionFields = {
   amount: number;
@@ -19,7 +17,7 @@ export async function resolveUserCurrencyConversion(
   inputAmount: number,
   inputCurrency?: string,
 ) {
-  const user = await UserModel.findById(userId).select("baseCurrency").lean();
+  const user = await userRepo.findById(userId);
   return resolveCurrencyConversion(
     user?.baseCurrency || "USD",
     inputAmount,

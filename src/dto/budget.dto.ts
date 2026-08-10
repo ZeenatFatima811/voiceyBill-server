@@ -1,6 +1,6 @@
-import { BudgetDocument } from "../models/budget.model";
-import TransactionModel, { TransactionTypeEnum } from "../models/transaction.model";
-import { convertToDollarUnit } from "../utils/format-currency";
+import type { BudgetApi } from "../db/mappers/budget.mapper";
+import { transactions as transactionRepo } from "../db/repositories";
+import { TransactionTypeEnum } from "../enums/domain.enum";
 
 export interface BudgetCategorySummaryDTO {
   name: string;
@@ -34,7 +34,7 @@ const normalizeBudgetCategory = (category: string) =>
   category.trim().toLowerCase().replace(/\s+/g, "_");
 
 export async function toBudgetSummaryDTO(
-  budget: BudgetDocument | null,
+  budget: BudgetApi | null,
   month: number,
   year: number,
   userId: string
@@ -59,13 +59,12 @@ export async function toBudgetSummaryDTO(
   const startDate = new Date(year, month - 1, 1);
   const endDate = new Date(year, month, 0, 23, 59, 59, 999);
 
-  const transactions = await TransactionModel.find({
+  // Amounts arrive in DOLLARS, exactly as the mongoose getter produced them.
+  const transactions = await transactionRepo.list({
     userId,
     type: TransactionTypeEnum.EXPENSE,
-    date: {
-      $gte: startDate,
-      $lte: endDate,
-    },
+    startDate,
+    endDate,
   });
 
   // Calculate spending by category and total monthly expenses.
@@ -157,7 +156,7 @@ export async function toBudgetSummaryDTO(
   };
 }
 
-export function toBudgetResponseDTO(budget: BudgetDocument) {
+export function toBudgetResponseDTO(budget: BudgetApi) {
   return {
     id: budget._id,
     month: budget.month,
