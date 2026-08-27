@@ -22,6 +22,11 @@ import {
 } from "../utils/app-error";
 import { compareValue } from "../utils/bcrypt";
 import { compareOtp, generateOtp, getOtpExpiresAt, hashOtp } from "../utils/otp";
+import {
+  storeDeleteAccountOtp,
+  getDeleteAccountOtp,
+  deleteDeleteAccountOtp,
+} from "../utils/otp-redis";
 import type {
   ChangePasswordType,
   DeleteAccountType,
@@ -98,10 +103,9 @@ export const sendDeleteAccountOtpService = async (userId: string) => {
   if (!user) throw new NotFoundException("User not found");
 
   const otp = generateOtp();
-  await users.update(userId, {
-    emailVerificationOtpHash: await hashOtp(otp),
-    emailVerificationOtpExpiresAt: getOtpExpiresAt(),
-  });
+  const otpHash = await hashOtp(otp);
+
+  await storeDeleteAccountOtp(userId, otpHash);
 
   await sendAccountDeletionOtpEmail({
     email: user.email,
@@ -114,33 +118,24 @@ export const deleteUserService = async (userId: string, body: DeleteAccountType)
   const user = await users.findByIdWithSecrets(userId);
   if (!user) throw new NotFoundException("User not found");
 
-  if (!user.emailVerificationOtpHash) {
+  const otpHash = await getDeleteAccountOtp(userId);
+
+  if (!otpHash) {
     throw new BadRequestException(
-      "OTP verification is required before deleting your account",
-      ErrorCodeEnum.ACCESS_UNAUTHORIZED,
+      "OTP verification is required or the code has expired. Please request a new code.",
+      ErrorCodeEnum.AUTH_OTP_INVALID,
     );
   }
 
-  if (
-    !user.emailVerificationOtpExpiresAt ||
-    user.emailVerificationOtpExpiresAt.getTime() < Date.now()
-  ) {
-    await users.update(userId, {
-      emailVerificationOtpHash: null,
-      emailVerificationOtpExpiresAt: null,
-    });
-
-    throw new UnauthorizedException(
-      "OTP code has expired. Please request a new code.",
-      ErrorCodeEnum.AUTH_OTP_EXPIRED,
-    );
-  }
-
-  const isOtpValid = await compareOtp(body.otp, user.emailVerificationOtpHash);
+  const isOtpValid = await compareOtp(body.otp, otpHash);
 
   if (!isOtpValid) {
-    throw new UnauthorizedException("Invalid OTP code", ErrorCodeEnum.AUTH_OTP_INVALID);
+    throw new UnauthorizedException(
+      "Invalid OTP code",
+      ErrorCodeEnum.AUTH_OTP_INVALID,
+    );
   }
+
 
   /**
    * One statement, not five.
@@ -159,6 +154,7 @@ export const deleteUserService = async (userId: string, body: DeleteAccountType)
    * would then block account deletion outright.
    */
   await users.remove(userId);
+  await deleteDeleteAccountOtp(userId);
 
   return { message: "User deleted successfully" };
 };

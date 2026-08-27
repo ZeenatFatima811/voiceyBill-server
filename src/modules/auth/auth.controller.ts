@@ -14,12 +14,14 @@ import {
 import { googleAuthSchema } from "../../validators/google-auth.validator";
 
 import { AuthService } from "./auth.service";
+import { CurrentUser } from "../../common/decorators/current-user.decorator";
+
 
 @Controller(`${Env.BASE_PATH}/auth`)
 export class AuthController {
   constructor(
     @Inject(AuthService) private readonly authService: AuthService,
-  ) {}
+  ) { }
 
   @Post("register")
   @HttpCode(HTTPSTATUS.CREATED)
@@ -84,10 +86,8 @@ export class AuthController {
 
   @Post("logout")
   @HttpCode(HTTPSTATUS.NO_CONTENT)
-  logout(): void {
-    // Stateless JWT: nothing to invalidate server-side. Client clears its own
-    // credentials. Returning 204 keeps the contract simple and lets the mobile
-    // client treat logout as fire-and-forget.
+  async logout(@CurrentUser() user: Express.User) {
+    await this.authService.logout(user._id);
   }
 
   @Post("verify-otp")

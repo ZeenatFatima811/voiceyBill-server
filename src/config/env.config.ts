@@ -19,6 +19,9 @@ const envConfig = () => ({
    */
   DATABASE_URL: getEnv("DATABASE_URL"),
 
+  UPSTASH_REDIS_REST_URL: getEnv("UPSTASH_REDIS_REST_URL"),
+  UPSTASH_REDIS_REST_TOKEN: getEnv("UPSTASH_REDIS_REST_TOKEN"),
+
   JWT_SECRET: getEnv("JWT_SECRET", "secert_jwt"),
   JWT_EXPIRES_IN: getEnv("JWT_EXPIRES_IN", "15m") as string,
 

@@ -46,6 +46,15 @@ import type {
   ResetPasswordSchemaType,
   VerifyOtpSchemaType,
 } from "../validators/auth.validator";
+import { markUserLoggedOut } from "../utils/auth-session";
+import {
+  storeVerificationOtp,
+  getVerificationOtp,
+  deleteVerificationOtp,
+  storePasswordResetOtp,
+  getPasswordResetOtp,
+  deletePasswordResetOtp,
+} from "../utils/otp-redis";
 
 const OTP_RESEND_COOLDOWN_MS = 60 * 1000; // 60 seconds
 
@@ -74,31 +83,26 @@ const createDefaultReportSetting = async (userId: string, exec?: Executor) => {
 const issueVerificationOtp = async (
   userId: string,
   exec?: Executor,
-): Promise<{ otp: string; user: UserApi }> => {
+): Promise<{ otp: string; otpHash: string; user: UserApi }> => {
   const otp = generateOtp();
+  const otpHash = await hashOtp(otp);
 
   const user = await users.update(
     userId,
     {
-      emailVerificationOtpHash: await hashOtp(otp),
-      emailVerificationOtpExpiresAt: getOtpExpiresAt(),
+      emailVerificationOtpHash: null,
+      emailVerificationOtpExpiresAt: null,
     },
     exec,
   );
 
-  // The row was read moments earlier on this same transaction, so a null here
-  // means it was deleted concurrently rather than that the id was wrong.
   if (!user) throw new NotFoundException("Account not found");
 
-  return { otp, user };
+  return { otp, otpHash, user };
 };
 
 export const registerService = async (body: RegisterSchemaType) => {
-  let verificationEmailPayload:
-    | { email: string; username: string; otp: string }
-    | undefined;
-
-  const response = await withTransaction(async (tx) => {
+  const transactionResult = await withTransaction(async (tx) => {
     const existingUser = await users.findByEmailWithSecrets(body.email, tx);
 
     if (existingUser?.isVerified) {
@@ -109,36 +113,59 @@ export const registerService = async (body: RegisterSchemaType) => {
     }
 
     if (existingUser && !existingUser.isVerified) {
-      const { otp, user } = await issueVerificationOtp(existingUser._id, tx);
+      const { otp, otpHash, user } = await issueVerificationOtp(
+        existingUser._id,
+        tx,
+      );
 
-      verificationEmailPayload = {
+      return {
+        user,
+        verificationRequired: true,
+        otpHash,
         email: existingUser.email,
         username: existingUser.name,
         otp,
       };
-
-      return { user, verificationRequired: true };
     }
 
-    const created = await users.create({ ...body, isVerified: false }, tx);
-    const { otp, user } = await issueVerificationOtp(created._id, tx);
+    const created = await users.create(
+      { ...body, isVerified: false },
+      tx,
+    );
 
-    verificationEmailPayload = {
+    const { otp, otpHash, user } = await issueVerificationOtp(
+      created._id,
+      tx,
+    );
+
+    return {
+      user,
+      verificationRequired: true,
+      otpHash,
       email: created.email,
       username: created.name,
       otp,
     };
-
-    return { user, verificationRequired: true };
   });
 
-  // Outside the transaction: a rolled-back registration must not have emailed
-  // an OTP for an account that no longer exists.
-  if (verificationEmailPayload) {
-    await sendVerificationOtpEmail(verificationEmailPayload);
-  }
+  // PostgreSQL transaction has successfully committed.
+  // Now store the OTP in Redis with its 10-minute TTL.
+  await storeVerificationOtp(
+    transactionResult.user._id,
+    transactionResult.otpHash,
+  );
 
-  return response;
+  // Send the plaintext OTP only after both DB and Redis operations succeed.
+  await sendVerificationOtpEmail({
+    email: transactionResult.email,
+    username: transactionResult.username,
+    otp: transactionResult.otp,
+  });
+
+  return {
+    user: transactionResult.user,
+    verificationRequired: true,
+  };
 };
 
 export const loginService = async (body: LoginSchemaType) => {
@@ -192,36 +219,22 @@ export const verifyOtpService = async (body: VerifyOtpSchemaType) => {
 
   if (user.isVerified) {
     return {
-      // Already-verified short circuit: the row is in hand and unmodified, so
-      // the safe projection of it is exactly what `omitPassword()` returned.
       user: stripSecrets(user),
       verified: true,
     };
   }
 
-  if (!user.emailVerificationOtpHash) {
+  // OTP is now stored in Redis with a 10-minute TTL.
+  const otpHash = await getVerificationOtp(user._id);
+
+  if (!otpHash) {
     throw new BadRequestException(
-      "Verification code not found. Please request a new code.",
+      "Verification code not found or has expired. Please request a new code.",
       ErrorCodeEnum.AUTH_OTP_INVALID,
     );
   }
 
-  if (
-    !user.emailVerificationOtpExpiresAt ||
-    user.emailVerificationOtpExpiresAt.getTime() < Date.now()
-  ) {
-    await users.update(user._id, {
-      emailVerificationOtpHash: null,
-      emailVerificationOtpExpiresAt: null,
-    });
-
-    throw new UnauthorizedException(
-      "Verification code has expired. Please request a new code.",
-      ErrorCodeEnum.AUTH_OTP_EXPIRED,
-    );
-  }
-
-  const isOtpValid = await compareOtp(otp, user.emailVerificationOtpHash);
+  const isOtpValid = await compareOtp(otp, otpHash);
 
   if (!isOtpValid) {
     throw new UnauthorizedException(
@@ -232,10 +245,6 @@ export const verifyOtpService = async (body: VerifyOtpSchemaType) => {
 
   /**
    * Verification and the default report setting commit together.
-   *
-   * The mongoose version saved the user, then created the setting in a separate
-   * statement with no session, so a failure in between left a verified account
-   * with no report setting and nothing to repair it.
    */
   const verified = await withTransaction(async (tx) => {
     const updated = await users.update(
@@ -248,16 +257,18 @@ export const verifyOtpService = async (body: VerifyOtpSchemaType) => {
       tx,
     );
 
-    // Deleted concurrently is the only way this is null — the row was read at
-    // the top of this function.
     if (!updated) throw new NotFoundException("Account not found");
 
     await createDefaultReportSetting(user._id, tx);
     return updated;
   });
 
-  // Auto-login: Generate JWT tokens
+  // OTP is one-time-use: delete it immediately after successful verification.
+  await deleteVerificationOtp(user._id);
+
+  // Auto-login
   const { token, expiresAt } = signJwtToken({ userId: verified._id });
+
   const refreshToken = signRefreshToken({
     userId: verified._id,
     tokenVersion: user.tokenVersion ?? 0,
@@ -285,11 +296,15 @@ export const resendOtpService = async (body: ResendOtpSchemaType) => {
     throw new ConflictException("Account is already verified");
   }
 
-  // Enforce cooldown between resend requests (per-email rate limiting)
+  // Enforce cooldown between resend requests.
   if (user.lastOtpResentAt) {
     const elapsed = Date.now() - user.lastOtpResentAt.getTime();
+
     if (elapsed < OTP_RESEND_COOLDOWN_MS) {
-      const retryAfterSeconds = Math.ceil((OTP_RESEND_COOLDOWN_MS - elapsed) / 1000);
+      const retryAfterSeconds = Math.ceil(
+        (OTP_RESEND_COOLDOWN_MS - elapsed) / 1000,
+      );
+
       throw new BadRequestException(
         `Please wait ${retryAfterSeconds} second(s) before requesting a new code.`,
         ErrorCodeEnum.AUTH_TOO_MANY_ATTEMPTS,
@@ -298,9 +313,13 @@ export const resendOtpService = async (body: ResendOtpSchemaType) => {
   }
 
   const otp = generateOtp();
+  const otpHash = await hashOtp(otp);
+
+  // Store OTP hash in Redis with automatic 10-minute expiration.
+  await storeVerificationOtp(user._id, otpHash);
+
+  // Keep only resend cooldown information in the database.
   await users.update(user._id, {
-    emailVerificationOtpHash: await hashOtp(otp),
-    emailVerificationOtpExpiresAt: getOtpExpiresAt(),
     lastOtpResentAt: new Date(),
   });
 
@@ -315,23 +334,24 @@ export const resendOtpService = async (body: ResendOtpSchemaType) => {
   };
 };
 
-export const forgotPasswordService = async (body: ForgotPasswordSchemaType) => {
+export const forgotPasswordService = async (
+  body: ForgotPasswordSchemaType,
+) => {
   const { email } = body;
 
   const user = await users.findByEmailWithSecrets(email);
+
   if (!user) {
-    // Deliberately indistinguishable from success — the response must not
-    // reveal whether an account exists.
     return {
       message: "If the email exists, a reset code has been sent",
     };
   }
 
   const otp = generateOtp();
-  await users.update(user._id, {
-    passwordResetOtpHash: await hashOtp(otp),
-    passwordResetOtpExpiresAt: getOtpExpiresAt(),
-  });
+  const otpHash = await hashOtp(otp);
+
+  // Store password reset OTP in Redis with a 10-minute TTL.
+  await storePasswordResetOtp(user._id, otpHash);
 
   await sendPasswordResetEmail({
     email: user.email,
@@ -344,61 +364,44 @@ export const forgotPasswordService = async (body: ForgotPasswordSchemaType) => {
   };
 };
 
-export const resetPasswordService = async (body: ResetPasswordSchemaType) => {
+export const resetPasswordService = async (
+  body: ResetPasswordSchemaType,
+) => {
   const { email, otp, password } = body;
 
   const user = await users.findByEmailWithSecrets(email);
   if (!user) throw new NotFoundException("Account not found");
 
-  if (!user.passwordResetOtpHash) {
+  // OTP is stored in Redis and expires automatically after 10 minutes.
+  const otpHash = await getPasswordResetOtp(user._id);
+
+  if (!otpHash) {
     throw new BadRequestException(
-      "Reset code not found. Please request a new code.",
+      "Reset code not found or has expired. Please request a new code.",
       ErrorCodeEnum.AUTH_OTP_INVALID,
     );
   }
 
-  if (
-    !user.passwordResetOtpExpiresAt ||
-    user.passwordResetOtpExpiresAt.getTime() < Date.now()
-  ) {
-    await users.update(user._id, {
-      passwordResetOtpHash: null,
-      passwordResetOtpExpiresAt: null,
-    });
-
-    throw new UnauthorizedException(
-      "Reset code has expired. Please request a new code.",
-      ErrorCodeEnum.AUTH_OTP_EXPIRED,
-    );
-  }
-
-  const isOtpValid = await compareOtp(otp, user.passwordResetOtpHash);
+  const isOtpValid = await compareOtp(otp, otpHash);
 
   if (!isOtpValid) {
-    throw new UnauthorizedException("Invalid reset code", ErrorCodeEnum.AUTH_OTP_INVALID);
+    throw new UnauthorizedException(
+      "Invalid reset code",
+      ErrorCodeEnum.AUTH_OTP_INVALID,
+    );
   }
 
   /**
-   * The new password, the cleared OTP and the token-version bump commit
-   * together. A partial apply here is a security bug: clearing the OTP without
-   * bumping the version would leave every stolen refresh token alive.
-   *
-   * The bump is `token_version + 1` computed IN SQL rather than read-then-write,
-   * so two concurrent resets cannot both read the same value and write the same
-   * bump — which would revoke one fewer generation than intended.
+   * Password update and token-version bump commit together.
    */
   await withTransaction(async (tx) => {
     await users.setPassword(user._id, password, tx);
-    await users.update(
-      user._id,
-      {
-        passwordResetOtpHash: null,
-        passwordResetOtpExpiresAt: null,
-      },
-      tx,
-    );
+
     await users.bumpTokenVersion(user._id, tx);
   });
+
+  // OTP is one-time-use.
+  await deletePasswordResetOtp(user._id);
 
   return {
     message: "Password reset successfully",
@@ -456,4 +459,9 @@ export const refreshTokenService = async (refreshToken: string) => {
     expiresAt,
     reportSetting,
   };
+};
+
+export const logoutService = async (userId: string) => {
+  await markUserLoggedOut(userId);
+  await users.bumpTokenVersion(userId);
 };

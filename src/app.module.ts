@@ -82,6 +82,8 @@ const OTP_LIMITED_ROUTES = [
   "reset-password",
 ];
 
+const AUTHENTICATED_ROUTES = ["logout"];
+
 const postRoute = (path: string): RouteInfo => ({
   path,
   method: RequestMethod.POST,
@@ -130,6 +132,21 @@ export class AppModule implements NestModule {
     consumer
       .apply(passportAuthenticateJwt)
       .forRoutes(...PROTECTED_PREFIXES.flatMap(mountedAt));
+
+    // 2b. JWT authentication for the logout endpoint.
+    consumer
+      .apply(passportAuthenticateJwt)
+      .forRoutes(
+        ...AUTHENTICATED_ROUTES.map((route) =>
+          postRoute(`${AUTH_PREFIX}/${route}`),
+        ),
+      );
+
+    consumer
+      .apply(otpLimiter)
+      .forRoutes(
+        postRoute(`${BASE_PATH}/user/account/otp`),
+      );
 
     // 3. Voice's own, wider CORS policy (allows preview deployments).
     consumer.apply(voiceCors).forRoutes(...mountedAt(`${BASE_PATH}/voice`));

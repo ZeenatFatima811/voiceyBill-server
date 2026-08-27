@@ -16,6 +16,7 @@ import type {
   CreateTransactionType,
   UpdateTransactionType,
 } from "../validators/transaction.validator";
+import { invalidateAnalyticsCache } from "../utils/analytics-cache";
 
 import {
   resolveCurrencyConversion,
@@ -141,7 +142,11 @@ export const createTransactionService = async (
   };
 
   if (body.type !== TransactionTypeEnum.EXPENSE) {
-    return transactionRepo.create(transactionDoc as never);
+    const transaction = await transactionRepo.create(transactionDoc as never);
+
+    await invalidateAnalyticsCache(userId);
+
+    return transaction;
   }
 
   // Expense: validate against the budget and insert atomically. Without a
@@ -149,7 +154,7 @@ export const createTransactionService = async (
   // total, both pass validation, and jointly exceed the budget (check-then-act
   // race). Snapshot reads + the insert now commit together; a validation
   // failure aborts the transaction. Requires a replica set (all Atlas tiers).
-  return withTransaction(async (tx) => {
+  const transaction = await withTransaction(async (tx) => {
     await validateExpenseAgainstBudget(
       userId,
       new Date(body.date),
@@ -161,6 +166,10 @@ export const createTransactionService = async (
 
     return transactionRepo.create(transactionDoc as never, tx);
   });
+
+  await invalidateAnalyticsCache(userId);
+
+  return transaction;
 };
 
 /**
@@ -459,6 +468,9 @@ export const updateTransactionService = async (
 
   if (targetType !== TransactionTypeEnum.EXPENSE) {
     await applyUpdate();
+
+    await invalidateAnalyticsCache(userId);
+
     return;
   }
 
@@ -480,6 +492,8 @@ export const updateTransactionService = async (
     await applyUpdate(tx);
   });
 
+  await invalidateAnalyticsCache(userId);
+
   return;
 };
 
@@ -492,6 +506,8 @@ export const deleteTransactionService = async (
   if (!deleted) {
     throw new NotFoundException("Transaction not found");
   }
+
+  await invalidateAnalyticsCache(userId);
 
   return;
 };
@@ -509,8 +525,9 @@ export const bulkDeleteTransactionService = async (
     throw new NotFoundException("No transations found");
   }
 
+  await invalidateAnalyticsCache(userId);
+
   return {
-    // NOTE the typo: the clients read `sucess`, so it is preserved verbatim.
     sucess: true,
     deletedCount,
   };
@@ -561,6 +578,8 @@ export const bulkTransactionService = async (
      * mongoose discarded it as an unknown path and it never reached a document.
      */
     const created = await transactionRepo.createMany(rows as never);
+
+    await invalidateAnalyticsCache(userId);
 
     return {
       insertedCount: created.length,

@@ -1,5 +1,6 @@
 import axios from "axios";
 
+import { redis } from "../config/redis.config";
 import { currency as currencyRepo, withTransaction } from "../db/repositories";
 import { InternalServerException } from "../utils/app-error";
 import { FALLBACK_SUPPORTED_CURRENCIES, CURRENCY_METADATA } from "../utils/currency.constants";
@@ -13,7 +14,7 @@ export interface ExchangeRateResult {
 }
 
 export class ExchangeRateService {
-  private readonly MAX_CACHE_AGE_MS = Number(process.env.MAX_CACHE_AGE_MS); // 6 hours, hardcoded is fine
+  private readonly MAX_CACHE_AGE_MS = Number(process.env.MAX_CACHE_AGE_MS); // PostgreSQL fallback cache freshness.
 
   private isFresh(doc: any): boolean {
     return doc && Date.now() - new Date(doc.fetchedAt).getTime() < this.MAX_CACHE_AGE_MS;
@@ -23,6 +24,27 @@ export class ExchangeRateService {
     const toUpper = to.toUpperCase();
 
     if (fromUpper === toUpper) return { rate: 1, source: "cached" };
+
+    const redisKey = `exchange-rate:${fromUpper}:${toUpper}`;
+
+    try {
+      const cachedRate = await redis.get<{
+        rate: number;
+        rateDate?: string;
+      }>(redisKey);
+
+      if (cachedRate) {
+        return {
+          rate: cachedRate.rate,
+          source: "cached",
+          rateDate: cachedRate.rateDate,
+        };
+      }
+    } catch (error: any) {
+      console.warn("Redis exchange-rate lookup failed:", error.message);
+    }
+
+
 
     // 1. Cross-rate from DB using USD as base
     const [rateFrom, rateTo] = await Promise.all([
@@ -35,8 +57,23 @@ export class ExchangeRateService {
     ]);
 
     if (rateFrom && rateTo && this.isFresh(rateFrom) && this.isFresh(rateTo)) {
+      const crossRate = (rateTo as any).rate / (rateFrom as any).rate;
+
+      redis
+        .set(
+          redisKey,
+          {
+            rate: crossRate,
+            rateDate: (rateTo as any).rateDate,
+          },
+          { ex: 60 * 60 },
+        )
+        .catch((error: any) => {
+          console.warn("Redis exchange-rate cache write failed:", error.message);
+        });
+
       return {
-        rate: (rateTo as any).rate / (rateFrom as any).rate,
+        rate: crossRate,
         source: "cached",
         rateDate: (rateTo as any).rateDate,
       };
@@ -69,6 +106,19 @@ export class ExchangeRateService {
           })
           .catch(console.warn);
 
+        redis
+          .set(
+            redisKey,
+            {
+              rate,
+              rateDate,
+            },
+            { ex: 60 * 60 },
+          )
+          .catch((error: any) => {
+            console.warn("Redis exchange-rate cache write failed:", error.message);
+          });
+
         return { rate, source: "live", rateDate };
       }
     } catch (error: any) {
@@ -89,7 +139,7 @@ export class ExchangeRateService {
     );
   }
 
- async getSupportedCurrencies(): Promise<Record<string, string>> {
+  async getSupportedCurrencies(): Promise<Record<string, string>> {
     try {
       // 1. Attempt to fetch from MongoDB cache
       const cached = await currencyRepo.listSupported();

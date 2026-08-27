@@ -4,6 +4,7 @@ import {
   forgotPasswordService,
   loginService,
   refreshTokenService,
+  logoutService,
   registerService,
   resendOtpService,
   resetPasswordService,
@@ -30,6 +31,10 @@ export class AuthService {
 
   refreshToken(refreshToken: string) {
     return refreshTokenService(refreshToken);
+  }
+
+  logout(userId: string) {
+    return logoutService(userId);
   }
 
   verifyOtp(body: Parameters<typeof verifyOtpService>[0]) {

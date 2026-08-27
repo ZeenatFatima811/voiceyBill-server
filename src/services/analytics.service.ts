@@ -17,6 +17,7 @@ import { transactions as transactionRepo } from "../db/repositories";
 import { DateRangeEnum, type DateRangePreset } from "../enums/date-range.enum";
 import { getDateRange } from "../utils/date";
 import { convertToDollarUnit } from "../utils/format-currency";
+import { redis } from "../config/redis.config";
 
 export const summaryAnalyticsService = async (
   userId: string,
@@ -27,6 +28,21 @@ export const summaryAnalyticsService = async (
   const range = getDateRange(dateRangePreset, customFrom, customTo);
 
   const { from, to, value: rangeValue } = range;
+
+  const redisKey = `analytics:summary:${userId}:${rangeValue ?? "all"}:${from?.toISOString() ?? "none"}:${to?.toISOString() ?? "none"}`;
+
+  try {
+    const cached = await redis.get(redisKey);
+
+    if (cached) {
+      console.log("Redis cache HIT:", redisKey);
+      return cached;
+    }
+  } catch (error: any) {
+    console.log("Redis cache MISS:", redisKey);
+    console.warn("Redis analytics lookup failed:", error.message);
+  }
+
 
   // PERF: the previous-period query depends only on the requested range (not on
   // the current-period result), so both run concurrently.
@@ -64,10 +80,10 @@ export const summaryAnalyticsService = async (
    */
   const savingData = current
     ? {
-        savingsPercentage:
-          totalIncome <= 0 ? 0 : ((totalIncome - totalExpenses) / totalIncome) * 100,
-        expenseRatio: totalIncome <= 0 ? 0 : (totalExpenses / totalIncome) * 100,
-      }
+      savingsPercentage:
+        totalIncome <= 0 ? 0 : ((totalIncome - totalExpenses) / totalIncome) * 100,
+      expenseRatio: totalIncome <= 0 ? 0 : (totalExpenses / totalIncome) * 100,
+    }
     : { savingsPercentage: 0, expenseRatio: 0 };
 
   let percentageChange: any = {
@@ -102,7 +118,7 @@ export const summaryAnalyticsService = async (
     };
   }
 
-  return {
+  const result = {
     availableBalance: convertToDollarUnit(availableBalance),
     totalIncome: convertToDollarUnit(totalIncome),
     totalExpenses: convertToDollarUnit(totalExpenses),
@@ -125,6 +141,38 @@ export const summaryAnalyticsService = async (
       label: range?.label || "All Time",
     },
   };
+
+  try {
+    await redis.set(redisKey, result, { ex: 60 * 5 });
+  } catch (error: any) {
+    console.warn("Redis analytics cache write failed:", error.message);
+  }
+
+  return result;
+
+  // return {
+  //   availableBalance: convertToDollarUnit(availableBalance),
+  //   totalIncome: convertToDollarUnit(totalIncome),
+  //   totalExpenses: convertToDollarUnit(totalExpenses),
+  //   savingRate: {
+  //     percentage: parseFloat(savingData.savingsPercentage.toFixed(2)),
+  //     expenseRatio: parseFloat(savingData.expenseRatio.toFixed(2)),
+  //   },
+  //   transactionCount,
+  //   percentageChange: {
+  //     ...percentageChange,
+  //     previousValues: {
+  //       incomeAmount: convertToDollarUnit(percentageChange.previousValues.incomeAmount),
+  //       expenseAmount: convertToDollarUnit(percentageChange.previousValues.expenseAmount),
+  //       balanceAmount: convertToDollarUnit(percentageChange.previousValues.balanceAmount),
+  //     },
+  //   },
+  //   preset: {
+  //     ...range,
+  //     value: rangeValue || DateRangeEnum.ALL_TIME,
+  //     label: range?.label || "All Time",
+  //   },
+  // };
 };
 
 export const chartAnalyticsService = async (
@@ -135,6 +183,20 @@ export const chartAnalyticsService = async (
 ) => {
   const range = getDateRange(dateRangePreset, customFrom, customTo);
   const { from, to, value: rangeValue } = range;
+
+  const redisKey = `analytics:chart:${userId}:${rangeValue ?? "all"}:${from?.toISOString() ?? "none"}:${to?.toISOString() ?? "none"}`;
+
+  try {
+    const cached = await redis.get(redisKey);
+
+    if (cached) {
+      console.log("Redis cache HIT:", redisKey);
+      return cached;
+    }
+  } catch (error: any) {
+    console.log("Redis cache MISS:", redisKey);
+    console.warn("Redis analytics lookup failed:", error.message);
+  }
 
   const points = await transactionRepo.chartAggregate(userId, from, to);
 
@@ -154,15 +216,15 @@ export const chartAnalyticsService = async (
    */
   const totals = points.length
     ? points.reduce(
-        (acc, item) => ({
-          totalIncomeCount: acc.totalIncomeCount + item.incomeCount,
-          totalExpenseCount: acc.totalExpenseCount + item.expenseCount,
-        }),
-        { totalIncomeCount: 0, totalExpenseCount: 0 },
-      )
+      (acc, item) => ({
+        totalIncomeCount: acc.totalIncomeCount + item.incomeCount,
+        totalExpenseCount: acc.totalExpenseCount + item.expenseCount,
+      }),
+      { totalIncomeCount: 0, totalExpenseCount: 0 },
+    )
     : { totalIncomeCount: undefined, totalExpenseCount: undefined };
 
-  return {
+  const result = {
     chartData: transaformedData,
     totalIncomeCount: totals.totalIncomeCount,
     totalExpenseCount: totals.totalExpenseCount,
@@ -172,6 +234,25 @@ export const chartAnalyticsService = async (
       label: range?.label || "All Time",
     },
   };
+
+  try {
+    await redis.set(redisKey, result, { ex: 60 * 5 });
+  } catch (error: any) {
+    console.warn("Redis analytics cache write failed:", error.message);
+  }
+
+  return result;
+
+  // return {
+  //   chartData: transaformedData,
+  //   totalIncomeCount: totals.totalIncomeCount,
+  //   totalExpenseCount: totals.totalExpenseCount,
+  //   preset: {
+  //     ...range,
+  //     value: rangeValue || DateRangeEnum.ALL_TIME,
+  //     label: range?.label || "All Time",
+  //   },
+  // };
 };
 
 export const expensePieChartBreakdownService = async (
@@ -182,6 +263,20 @@ export const expensePieChartBreakdownService = async (
 ) => {
   const range = getDateRange(dateRangePreset, customFrom, customTo);
   const { from, to, value: rangeValue } = range;
+
+  const redisKey = `analytics:expense-breakdown:${userId}:${rangeValue ?? "all"}:${from?.toISOString() ?? "none"}:${to?.toISOString() ?? "none"}`;
+
+  try {
+    const cached = await redis.get(redisKey);
+
+    if (cached) {
+      console.log("Redis cache HIT:", redisKey);
+      return cached;
+    }
+  } catch (error: any) {
+    console.log("Redis cache MISS:", redisKey);
+    console.warn("Redis analytics lookup failed:", error.message);
+  }
 
   const categories = await transactionRepo.expenseByCategory(userId, from, to);
 
@@ -221,15 +316,15 @@ export const expensePieChartBreakdownService = async (
       ...item,
       name: item.name
         ? item.name
-            .split(" ")
-            .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-            .join(" ")
+          .split(" ")
+          .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+          .join(" ")
         : "",
       value: convertToDollarUnit(item.value),
     })),
   };
 
-  return {
+  const result = {
     ...transformedData,
     preset: {
       ...range,
@@ -237,6 +332,23 @@ export const expensePieChartBreakdownService = async (
       label: range?.label || "All Time",
     },
   };
+
+  try {
+    await redis.set(redisKey, result, { ex: 60 * 5 });
+  } catch (error: any) {
+    console.warn("Redis analytics cache write failed:", error.message);
+  }
+
+  return result;
+
+  // return {
+  //   ...transformedData,
+  //   preset: {
+  //     ...range,
+  //     value: rangeValue || DateRangeEnum.ALL_TIME,
+  //     label: range?.label || "All Time",
+  //   },
+  // };
 };
 
 function calaulatePercentageChange(previous: number, current: number) {

@@ -1,6 +1,6 @@
 import cron from "node-cron";
 
-import { updateSupportedCurrenciesCache, updateExchangeRatesCache } from "./jobs/currency.job";
+import { updateSupportedCurrenciesCache, updateExchangeRatesCache, updateExchangeRatesRedisCache } from "./jobs/currency.job";
 import { processReportJob } from "./jobs/report.job";
 import { processRecurringTransactions } from "./jobs/transaction.job";
 
@@ -35,6 +35,9 @@ export const startJobs = () => {
     scheduleJob("Currency Cache Update", "0 0 * * *", updateSupportedCurrenciesCache),
 
     // Exchange rates — every 6 hours
-    scheduleJob("Exchange Rates Cache Update", "0 */6 * * *", updateExchangeRatesCache)
+    scheduleJob("Exchange Rates Cache Update", "0 */6 * * *", updateExchangeRatesCache),
+
+    // Exchange rates Redis cache — every hour
+    scheduleJob("Exchange Rates Redis Cache Update", "0 * * * *", updateExchangeRatesRedisCache)
   ];
 };

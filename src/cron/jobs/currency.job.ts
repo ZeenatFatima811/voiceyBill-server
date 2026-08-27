@@ -1,6 +1,7 @@
 import axios from "axios";
 
 import { currency as currencyRepo, withTransaction } from "../../db/repositories";
+import { redis } from "../../config/redis.config";
 export const updateSupportedCurrenciesCache = async () => {
   try {
     const providerUrl = process.env.EXCHANGE_RATE_PROVIDER_URL;
@@ -26,7 +27,7 @@ export const updateSupportedCurrenciesCache = async () => {
       console.log(`⏰ Successfully cached ${docs.length} supported currencies`);
       return { success: true, count: docs.length };
     }
-    
+
     console.warn("Currencies response from provider was empty or invalid");
     return { success: false, error: "Empty currencies list" };
   } catch (error: any) {
@@ -36,8 +37,8 @@ export const updateSupportedCurrenciesCache = async () => {
 };
 
 export const updateExchangeRatesCache = async () => {
-  const PROVIDER_BASE_URL=process.env.EXCHANGE_RATE_PROVIDER_URL
-  const TIMEOUT=Number(process.env.EXCHANGE_RATE_TIMEOUT_MS)
+  const PROVIDER_BASE_URL = process.env.EXCHANGE_RATE_PROVIDER_URL
+  const TIMEOUT = Number(process.env.EXCHANGE_RATE_TIMEOUT_MS)
   try {
     console.log(`Starting exchange rates cache update...`);
     const response = await axios.get(`${PROVIDER_BASE_URL}/rates`, {
@@ -75,6 +76,48 @@ export const updateExchangeRatesCache = async () => {
     return { success: true, count: rates.length };
   } catch (error: any) {
     console.warn("Failed to update exchange rates cache:", error.message);
+    return { success: false, error: error.message };
+  }
+};
+
+export const updateExchangeRatesRedisCache = async () => {
+  const PROVIDER_BASE_URL = process.env.EXCHANGE_RATE_PROVIDER_URL;
+  const TIMEOUT = Number(process.env.EXCHANGE_RATE_TIMEOUT_MS);
+  try {
+    console.log(`Starting exchange rates Redis cache update...`);
+    const response = await axios.get(`${PROVIDER_BASE_URL}/rates`, {
+      params: { base: "USD" },
+      timeout: TIMEOUT,
+    });
+
+    const rates: Array<{ quote: string; rate: number; date: string }> = response.data;
+
+    if (!rates?.length) {
+      console.warn("Exchange rates response was empty");
+      return { success: false, error: "Empty rates list" };
+    }
+
+    const ops = rates.map((r) => {
+      const key = `exchange-rate:USD:${r.quote}`;
+      return redis
+        .set(
+          key,
+          {
+            rate: r.rate,
+            rateDate: r.date,
+          },
+          { ex: 60 * 60 },
+        )
+        .catch((error: any) => {
+          console.warn("Redis set failed for", key, error?.message || error);
+        });
+    });
+
+    await Promise.all(ops);
+    console.log(`✅ Redis cached ${rates.length} exchange rates`);
+    return { success: true, count: rates.length };
+  } catch (error: any) {
+    console.warn("Failed to update Exchange Rates Redis cache:", error.message);
     return { success: false, error: error.message };
   }
 };
