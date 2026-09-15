@@ -33,6 +33,8 @@ const TEST_ENV: Record<string, string> = {
    * time and now requires DATABASE_URL with no fallback.
    */
   DATABASE_URL: "postgresql://unused:unused@127.0.0.1:5432/unused-in-tests",
+  UPSTASH_REDIS_REST_URL: "https://test.upstash.io",
+  UPSTASH_REDIS_REST_TOKEN: "test-upstash-token",
   JWT_SECRET,
   OPENAI_API_KEY: "test-openai-key",
   UPLIFT_AI_API_KEY: "test-uplift-key",
@@ -53,7 +55,7 @@ for (const [key, value] of Object.entries(TEST_ENV)) {
 // error while `performanceLogger` logs every request. Left unmuted that buries
 // real failures in CI output. Set TEST_VERBOSE=1 to see it all.
 if (!process.env.TEST_VERBOSE) {
-  const drop = () => {};
+  const drop = () => { };
   console.log = drop;
   console.warn = drop;
   console.error = drop;
@@ -64,6 +66,34 @@ if (!process.env.TEST_VERBOSE) {
 // a developer's real .env can never leak into a test run.
 stubPackage("dotenv/config", {});
 
+// Rate-limit behavior is tested locally; CI must not depend on a live Upstash
+// instance or fake credentials. The production middleware remains exercised in
+// deployed environments, while this keeps the e2e suite deterministic.
+const expressRateLimit = require("express-rate-limit");
+stubModule("middlewares/rateLimit.middleware", {
+  otpLimiter: expressRateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: 6,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { message: "Too many requests, please try again later." },
+  }),
+  authLimiter: expressRateLimit({
+    windowMs: 60 * 60 * 1000,
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+      message: "Too many authentication attempts, please try again later.",
+    },
+  }),
+});
+stubModule("utils/auth-session", {
+  isTokenInvalidatedByLogout: async () => false,
+  markUserLoggedOut: async () => undefined,
+  getUserLogoutAt: async () => null,
+});
+
 // ---------------------------------------------------------------------------
 // 2. I/O leaves. Everything else is the real implementation.
 // ---------------------------------------------------------------------------
@@ -73,7 +103,7 @@ stubPackage("dotenv/config", {});
 export const dbConnect = recorder("ensureDatabaseConnection");
 
 stubModule("config/database.config", {
-  connctDatabase: async () => {},
+  connctDatabase: async () => { },
   isDatabaseConnected: () => true,
   ensureDatabaseConnection: (
     _req: unknown,
@@ -260,8 +290,8 @@ export const multipart = (
   const boundary = "----voiceybilltestboundary";
   const head = Buffer.from(
     `--${boundary}\r\n` +
-      `Content-Disposition: form-data; name="${field}"; filename="${filename}"\r\n` +
-      `Content-Type: ${mimeType}\r\n\r\n`,
+    `Content-Disposition: form-data; name="${field}"; filename="${filename}"\r\n` +
+    `Content-Type: ${mimeType}\r\n\r\n`,
   );
   const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
   return {

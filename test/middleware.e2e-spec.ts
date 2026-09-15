@@ -172,6 +172,7 @@ describe("rate limiting", () => {
   test("RateLimit headers are ABSENT on /auth/logout, which was never limited", async () => {
     const res = await request("POST", "/api/auth/logout", {
       clientIp: uniqueIp(),
+      token: validToken(),
     });
     assert.equal(res.status, 204);
     assert.equal(res.headers["ratelimit-limit"], undefined);

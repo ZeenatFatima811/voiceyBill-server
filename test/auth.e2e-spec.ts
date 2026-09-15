@@ -137,10 +137,9 @@ describe("the /auth prefix is not behind authentication", () => {
     assert.equal(res.json.message, "User logged in successfully");
   });
 
-  test("POST /api/auth/logout needs no token and returns an empty 204", async () => {
+  test("POST /api/auth/logout requires a token", async () => {
     const res = await request("POST", "/api/auth/logout");
-    assert.equal(res.status, 204);
-    assert.equal(res.text, "");
+    assert.equal(res.status, 401);
   });
 
   test("an unknown sub-path under /api/auth is a 404, not a 401", async () => {

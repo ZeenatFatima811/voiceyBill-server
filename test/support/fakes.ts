@@ -26,10 +26,10 @@ export const lastCall = (fn: string): Call | undefined =>
 /** Wraps a fixed return value in an async function that records its arguments. */
 const rec =
   <T>(fn: string, result: T) =>
-  async (...args: unknown[]): Promise<T> => {
-    calls.push({ fn, args });
-    return result;
-  };
+    async (...args: unknown[]): Promise<T> => {
+      calls.push({ fn, args });
+      return result;
+    };
 
 /** The user `findByIdUserService` resolves for a valid token. */
 export const TEST_USER = {
@@ -75,6 +75,7 @@ export const authServiceStub = {
     accessToken: "new-access-token",
     expiresAt: 1893456000,
   }),
+  logoutService: rec("logoutService", undefined),
 };
 
 export const googleAuthServiceStub = {
@@ -170,7 +171,7 @@ export const analyticsServiceStub = {
 };
 
 export const exchangeRateStub = {
-  ExchangeRateService: class {},
+  ExchangeRateService: class { },
   exchangeRateService: {
     getSupportedCurrencies: async () => {
       calls.push({ fn: "getSupportedCurrencies", args: [] });
@@ -188,7 +189,7 @@ export const voiceState = { transcription: "spent 500 on lunch", failWith: null 
 
 export const upliftStub = {
   UpliftAIService: class {
-    constructor(public key: string) {}
+    constructor(public key: string) { }
     validateAudioFile(filePath: string) {
       calls.push({ fn: "validateAudioFile", args: [filePath] });
       return true;
@@ -202,9 +203,9 @@ export const upliftStub = {
 };
 
 export const geminiStub = {
-  OpenAIClassificationService: class {},
+  OpenAIClassificationService: class { },
   GeminiClassificationService: class {
-    constructor(public key: string) {}
+    constructor(public key: string) { }
     async classifyTransaction(text: string, categories: string[]) {
       calls.push({ fn: "classifyTransaction", args: [text, categories] });
       return {

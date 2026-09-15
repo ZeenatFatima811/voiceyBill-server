@@ -90,11 +90,14 @@ describe("auth routes", () => {
     );
   });
 
-  test("POST /logout -> 204, empty body, no service call", async () => {
-    const res = await request("POST", "/api/auth/logout", { clientIp: uniqueIp() });
+  test("POST /logout -> 204, empty body, and calls the service", async () => {
+    const res = await request("POST", "/api/auth/logout", {
+      clientIp: uniqueIp(),
+      token: validToken(),
+    });
     assert.equal(res.status, 204);
     assert.equal(res.text, "");
-    assert.equal(fakes.calls.length, 0);
+    assert.deepEqual(fakes.lastCall("logoutService")?.args, [fakes.TEST_USER._id]);
   });
 
   test("POST /verify-otp -> 200 with data envelope", async () => {
@@ -300,7 +303,7 @@ describe("transaction routes", () => {
     const res = await request(
       "GET",
       "/api/transaction/all?keyword=coffee&type=EXPENSE&recurringStatus=RECURRING" +
-        "&startDate=2026-07-01&endDate=2026-07-31&pageSize=2&pageNumber=3",
+      "&startDate=2026-07-01&endDate=2026-07-31&pageSize=2&pageNumber=3",
       auth(),
     );
     assert.equal(res.status, 200);

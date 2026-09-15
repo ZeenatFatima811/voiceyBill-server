@@ -20,6 +20,7 @@
 
 
 import { Ratelimit } from "@upstash/ratelimit";
+import type { NextFunction, Request, Response } from "express";
 
 import { redis } from "../config/redis.config";
 
@@ -47,18 +48,30 @@ const authRateLimiter = createRateLimiter(
   "ratelimit:auth",
 );
 
-const getClientIp = (req: any): string => {
-  return (
-    req.ip ||
-    req.headers?.["x-forwarded-for"]?.split(",")[0]?.trim() ||
-    "unknown"
-  );
+const getClientIp = (req: Request): string => {
+  const forwardedFor = req.headers["x-forwarded-for"];
+  const forwardedIp = Array.isArray(forwardedFor)
+    ? forwardedFor[0]
+    : forwardedFor?.split(",")[0]?.trim();
+
+  return req.ip || forwardedIp || "unknown";
 };
 
-export const otpLimiter = async (req: any, res: any, next: any) => {
+export const otpLimiter = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
   const identifier = getClientIp(req);
 
   const result = await otpRateLimiter.limit(identifier);
+
+  res.setHeader("RateLimit-Limit", String(result.limit));
+  res.setHeader("RateLimit-Remaining", String(Math.max(0, result.remaining)));
+  res.setHeader(
+    "RateLimit-Reset",
+    String(Math.max(0, Math.ceil((result.reset - Date.now()) / 1000))),
+  );
 
   if (!result.success) {
     res.setHeader(
@@ -73,10 +86,21 @@ export const otpLimiter = async (req: any, res: any, next: any) => {
   next();
 };
 
-export const authLimiter = async (req: any, res: any, next: any) => {
+export const authLimiter = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
   const identifier = getClientIp(req);
 
   const result = await authRateLimiter.limit(identifier);
+
+  res.setHeader("RateLimit-Limit", String(result.limit));
+  res.setHeader("RateLimit-Remaining", String(Math.max(0, result.remaining)));
+  res.setHeader(
+    "RateLimit-Reset",
+    String(Math.max(0, Math.ceil((result.reset - Date.now()) / 1000))),
+  );
 
   if (!result.success) {
     res.setHeader(
